@@ -28,10 +28,10 @@ startSelectionObserver((selection, paste) => {
 ```
 
 🖥 Supported Platforms
-OS	Support
+
+
 macOS ✅	Fully supported
 Windows 🟡	Coming soon
 
-🤝 Contributing
-Open issues or pull requests are welcomed!
+
 
