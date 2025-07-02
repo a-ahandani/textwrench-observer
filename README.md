@@ -1,8 +1,4 @@
-Change references from the previous name to text-observer:
 
-markdown
-Copy
-Edit
 # text-observer
 
 > A cross-platform (Mac/Windows) library for observing OS-level text selections, processing text, updating clipboard, and automatic pasting.
@@ -17,10 +13,10 @@ Edit
 
 ```bash
 npm install text-observer
+```
+
 🛠 Usage
-js
-Copy
-Edit
+```js
 const { startSelectionObserver } = require('text-observer');
 
 startSelectionObserver((selection, paste) => {
@@ -29,6 +25,8 @@ startSelectionObserver((selection, paste) => {
   const processedText = selection.text.toUpperCase();
   paste(processedText);
 });
+```
+
 🖥 Supported Platforms
 OS	Support
 macOS ✅	Fully supported
