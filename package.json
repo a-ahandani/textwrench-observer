@@ -1,26 +1,27 @@
 {
-    "name": "text-observer",
-    "version": "2.0.0",
+    "name": "textwrench-observer",
+    "version": "2.1.0",
     "description": "Cross-platform (Mac/Win) library to get OS-level text selection, process it, and paste automatically.",
     "main": "index.js",
     "scripts": {
-      "build-mac": "cd helpers/mac && ./build.sh",
-      "prepare": "npm run build-mac"
+        "build-mac": "cd helpers/mac && ./build.sh",
+        "prepare": "npm run build-mac"
     },
     "keywords": [
-      "electron",
-      "macos",
-      "windows",
-      "text-selection",
-      "clipboard",
-      "automation"
+        "electron",
+        "macos",
+        "windows",
+        "text-selection",
+        "clipboard",
+        "automation"
     ],
     "author": "Your Name",
     "license": "MIT",
     "repository": {
-      "type": "git",
-      "url": "https://github.com/a-ahandani/text-observer.git"
+        "type": "git",
+        "url": "https://github.com/a-ahandani/textwrench-observer.git"
     },
-    "os": ["darwin"]
-  }
-  
+    "os": [
+        "darwin"
+    ]
+}
