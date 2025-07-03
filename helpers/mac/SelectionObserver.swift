@@ -52,63 +52,65 @@ class SelectionObserver {
         self.triggerIfSelectionChanged()
     }
 
-    static func currentSelection() -> [String: Any]? {
-        guard let frontApp = NSWorkspace.shared.frontmostApplication else { return nil }
-        let pid = frontApp.processIdentifier
-        let appElement = AXUIElementCreateApplication(pid)
-
-        var focusedElementRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedElementRef) == .success,
-              let focusedElement = focusedElementRef else { return nil }
-
-        // Try to get the selected range
-        var selectedRangeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(focusedElement as! AXUIElement, kAXSelectedTextRangeAttribute as CFString, &selectedRangeRef) == .success,
-              let axValue = selectedRangeRef, AXValueGetType(axValue as! AXValue) == .cfRange else { return nil }
-
-        var selectedRange = CFRange()
-        AXValueGetValue(axValue as! AXValue, .cfRange, &selectedRange)
-
-        // Try to get the full text
-        var fullTextRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(focusedElement as! AXUIElement, kAXValueAttribute as CFString, &fullTextRef) == .success,
-              let fullText = fullTextRef as? String else { return nil }
-
-        // Validate range (using utf16, which matches AX ranges)
-        let textLength = fullText.utf16.count
-        let startLoc = selectedRange.location
-        let length = selectedRange.length
-
-        guard startLoc >= 0, length > 0, startLoc + length <= textLength else {
-            // Invalid or out-of-bounds range: bail out gracefully
-            return nil
+   static func currentSelection() -> [String: Any]? {
+    guard let frontApp = NSWorkspace.shared.frontmostApplication else { return nil }
+    let pid = frontApp.processIdentifier
+    let appElement = AXUIElementCreateApplication(pid)
+    
+    // First try the focused element approach (works for editable text)
+    var focusedElementRef: CFTypeRef?
+    if AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedElementRef) == .success,
+       let focusedElement = focusedElementRef {
+        
+        // Try to get selected text directly
+        var selectedTextRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(focusedElement as! AXUIElement, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
+           let selectedText = selectedTextRef as? String {
+            
+            // Get position if available
+            var positionRef: CFTypeRef?
+            var position: CGPoint = .zero
+            if AXUIElementCopyAttributeValue(focusedElement as! AXUIElement, kAXPositionAttribute as CFString, &positionRef) == .success,
+               let positionAXValue = positionRef,
+               AXValueGetType(positionAXValue as! AXValue) == .cgPoint {
+                AXValueGetValue(positionAXValue as! AXValue, .cgPoint, &position)
+            }
+            
+            return [
+                "text": selectedText,
+                "position": ["x": position.x, "y": position.y]
+            ]
         }
-
-        // Convert utf16 indices to String.Index safely
-        guard let startUTF16 = fullText.utf16.index(fullText.utf16.startIndex, offsetBy: startLoc, limitedBy: fullText.utf16.endIndex),
-              let endUTF16 = fullText.utf16.index(startUTF16, offsetBy: length, limitedBy: fullText.utf16.endIndex),
-              let startIdx = String.Index(startUTF16, within: fullText),
-              let endIdx = String.Index(endUTF16, within: fullText) else {
-            // Index conversion failed, bail out gracefully
-            return nil
-        }
-
-        let selectedText = String(fullText[startIdx..<endIdx])
-
-        // Try to get the position, if available
-        var positionRef: CFTypeRef?
-        var position: CGPoint = .zero
-        if AXUIElementCopyAttributeValue(focusedElement as! AXUIElement, kAXPositionAttribute as CFString, &positionRef) == .success,
-           let positionAXValue = positionRef,
-           AXValueGetType(positionAXValue as! AXValue) == .cgPoint {
-            AXValueGetValue(positionAXValue as! AXValue, .cgPoint, &position)
-        }
-
-        return [
-            "text": selectedText,
-            "position": ["x": position.x, "y": position.y]
-        ]
     }
+    
+    // If focused element approach failed, try the main window approach (for non-editable text)
+    var windowRef: CFTypeRef?
+    if AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &windowRef) == .success,
+       let window = windowRef {
+        
+        // Try to get selected text from the window
+        var selectedTextRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(window as! AXUIElement, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
+           let selectedText = selectedTextRef as? String {
+            
+            // Get position if available
+            var positionRef: CFTypeRef?
+            var position: CGPoint = .zero
+            if AXUIElementCopyAttributeValue(window as! AXUIElement, kAXPositionAttribute as CFString, &positionRef) == .success,
+               let positionAXValue = positionRef,
+               AXValueGetType(positionAXValue as! AXValue) == .cgPoint {
+                AXValueGetValue(positionAXValue as! AXValue, .cgPoint, &position)
+            }
+            
+            return [
+                "text": selectedText,
+                "position": ["x": position.x, "y": position.y]
+            ]
+        }
+    }
+    
+    return nil
+}
 
     static func reportSelection() {
         if let selection = currentSelection(),
