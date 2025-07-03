@@ -52,22 +52,52 @@ class SelectionObserver {
         self.triggerIfSelectionChanged()
     }
 
-   static func currentSelection() -> [String: Any]? {
+static func currentSelection() -> [String: Any]? {
     guard let frontApp = NSWorkspace.shared.frontmostApplication else { return nil }
     let pid = frontApp.processIdentifier
     let appElement = AXUIElementCreateApplication(pid)
     
-    // First try the focused element approach (works for editable text)
+    // Helper function to check if element is editable
+    func isElementEditable(_ element: AXUIElement) -> Bool {
+        // 1. Check AXEditable attribute directly
+        var editableRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, "AXEditable" as CFString, &editableRef) == .success,
+           let isEditable = editableRef as? Bool {
+            return isEditable
+        }
+        
+        // 2. Check for standard editable roles
+        var roleRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, "AXRole" as CFString, &roleRef) == .success,
+           let role = roleRef as? String {
+            let editableRoles = ["AXTextArea", "AXTextField", "AXTextField"]
+            if editableRoles.contains(role) {
+                return true
+            }
+        }
+        
+        // 3. Check if we can set the value (another indicator of editability)
+        var settable: DarwinBoolean = false
+        if AXUIElementIsAttributeSettable(element, "AXValue" as CFString, &settable) == .success {
+            return settable.boolValue
+        }
+        
+        return false
+    }
+    
+    // First try the focused element approach
     var focusedElementRef: CFTypeRef?
     if AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedElementRef) == .success,
        let focusedElement = focusedElementRef {
         
-        // Try to get selected text directly
+        let isEditable = isElementEditable(focusedElement as! AXUIElement)
+        
+        // Try to get selected text
         var selectedTextRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(focusedElement as! AXUIElement, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
            let selectedText = selectedTextRef as? String {
             
-            // Get position if available
+            // Get position
             var positionRef: CFTypeRef?
             var position: CGPoint = .zero
             if AXUIElementCopyAttributeValue(focusedElement as! AXUIElement, kAXPositionAttribute as CFString, &positionRef) == .success,
@@ -78,22 +108,21 @@ class SelectionObserver {
             
             return [
                 "text": selectedText,
-                "position": ["x": position.x, "y": position.y]
+                "position": ["x": position.x, "y": position.y],
+                "editable": isEditable
             ]
         }
     }
     
-    // If focused element approach failed, try the main window approach (for non-editable text)
+    // Window-level selection (non-editable by default)
     var windowRef: CFTypeRef?
     if AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &windowRef) == .success,
        let window = windowRef {
         
-        // Try to get selected text from the window
         var selectedTextRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(window as! AXUIElement, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
            let selectedText = selectedTextRef as? String {
             
-            // Get position if available
             var positionRef: CFTypeRef?
             var position: CGPoint = .zero
             if AXUIElementCopyAttributeValue(window as! AXUIElement, kAXPositionAttribute as CFString, &positionRef) == .success,
@@ -104,14 +133,14 @@ class SelectionObserver {
             
             return [
                 "text": selectedText,
-                "position": ["x": position.x, "y": position.y]
+                "position": ["x": position.x, "y": position.y],
+                "editable": false  // Window selections are non-editable
             ]
         }
     }
     
     return nil
 }
-
     static func reportSelection() {
         if let selection = currentSelection(),
            let jsonData = try? JSONSerialization.data(withJSONObject: selection),
