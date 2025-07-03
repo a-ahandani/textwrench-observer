@@ -57,16 +57,14 @@ static func currentSelection() -> [String: Any]? {
     let pid = frontApp.processIdentifier
     let appElement = AXUIElementCreateApplication(pid)
     
-    // Helper function to check if element is editable
+    // Helper to check if element is editable (moved inside the function)
     func isElementEditable(_ element: AXUIElement) -> Bool {
-        // 1. Check AXEditable attribute directly
         var editableRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(element, "AXEditable" as CFString, &editableRef) == .success,
            let isEditable = editableRef as? Bool {
             return isEditable
         }
         
-        // 2. Check for standard editable roles
         var roleRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(element, "AXRole" as CFString, &roleRef) == .success,
            let role = roleRef as? String {
@@ -76,7 +74,6 @@ static func currentSelection() -> [String: Any]? {
             }
         }
         
-        // 3. Check if we can set the value (another indicator of editability)
         var settable: DarwinBoolean = false
         if AXUIElementIsAttributeSettable(element, "AXValue" as CFString, &settable) == .success {
             return settable.boolValue
@@ -85,25 +82,45 @@ static func currentSelection() -> [String: Any]? {
         return false
     }
     
-    // First try the focused element approach
+    // Helper to get bounds of an element
+    func getBounds(_ element: AXUIElement) -> CGRect? {
+        var positionRef: CFTypeRef?
+        var sizeRef: CFTypeRef?
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        
+        if AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionRef) == .success,
+           let positionValue = positionRef,
+           AXValueGetType(positionValue as! AXValue) == .cgPoint {
+            AXValueGetValue(positionValue as! AXValue, .cgPoint, &position)
+        }
+        
+        if AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRef) == .success,
+           let sizeValue = sizeRef,
+           AXValueGetType(sizeValue as! AXValue) == .cgSize {
+            AXValueGetValue(sizeValue as! AXValue, .cgSize, &size)
+        }
+        
+        return CGRect(origin: position, size: size)
+    }
+    
+    // First try the focused element approach (editable text)
     var focusedElementRef: CFTypeRef?
     if AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedElementRef) == .success,
        let focusedElement = focusedElementRef {
         
-        let isEditable = isElementEditable(focusedElement as! AXUIElement)
+        let element = focusedElement as! AXUIElement
+        let isEditable = isElementEditable(element)
         
         // Try to get selected text
         var selectedTextRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(focusedElement as! AXUIElement, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
+        if AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
            let selectedText = selectedTextRef as? String {
             
-            // Get position
-            var positionRef: CFTypeRef?
-            var position: CGPoint = .zero
-            if AXUIElementCopyAttributeValue(focusedElement as! AXUIElement, kAXPositionAttribute as CFString, &positionRef) == .success,
-               let positionAXValue = positionRef,
-               AXValueGetType(positionAXValue as! AXValue) == .cgPoint {
-                AXValueGetValue(positionAXValue as! AXValue, .cgPoint, &position)
+            // Get element bounds
+            var position = CGPoint.zero
+            if let bounds = getBounds(element) {
+                position = bounds.origin
             }
             
             return [
@@ -114,27 +131,39 @@ static func currentSelection() -> [String: Any]? {
         }
     }
     
-    // Window-level selection (non-editable by default)
+    // For non-editable text (like in browsers)
     var windowRef: CFTypeRef?
     if AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &windowRef) == .success,
        let window = windowRef {
         
+        let windowElement = window as! AXUIElement
         var selectedTextRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(window as! AXUIElement, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
+        if AXUIElementCopyAttributeValue(windowElement, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
            let selectedText = selectedTextRef as? String {
             
-            var positionRef: CFTypeRef?
-            var position: CGPoint = .zero
-            if AXUIElementCopyAttributeValue(window as! AXUIElement, kAXPositionAttribute as CFString, &positionRef) == .success,
-               let positionAXValue = positionRef,
-               AXValueGetType(positionAXValue as! AXValue) == .cgPoint {
-                AXValueGetValue(positionAXValue as! AXValue, .cgPoint, &position)
+            // Get the selected text range
+            var selectedRangeRef: CFTypeRef?
+            var selectedRange = CFRange()
+            if AXUIElementCopyAttributeValue(windowElement, kAXSelectedTextRangeAttribute as CFString, &selectedRangeRef) == .success,
+               let rangeValue = selectedRangeRef,
+               AXValueGetType(rangeValue as! AXValue) == .cfRange {
+                AXValueGetValue(rangeValue as! AXValue, .cfRange, &selectedRange)
             }
+            
+            // Get window position to adjust coordinates
+            var windowPosition = CGPoint.zero
+            if let windowBounds = getBounds(windowElement) {
+                windowPosition = windowBounds.origin
+            }
+            
+            // Estimate position based on line height (since we can't get exact bounds)
+            let lineHeight: CGFloat = 20 // Approximate line height
+            let estimatedY = windowPosition.y + lineHeight
             
             return [
                 "text": selectedText,
-                "position": ["x": position.x, "y": position.y],
-                "editable": false  // Window selections are non-editable
+                "position": ["x": windowPosition.x, "y": estimatedY],
+                "editable": false
             ]
         }
     }
