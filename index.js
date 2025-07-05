@@ -15,12 +15,31 @@ function startSelectionObserver(onSelection) {
 
   const helper = spawn(helperPath);
 
+  let buffer = '';
+
   helper.stdout.on('data', data => {
-    const result = JSON.parse(data.toString());
-    onSelection(result, processedText => {
-      helper.stdin.write(processedText + '\n');
-    });
+    buffer += data.toString();
+  
+    let newlineIndex;
+    while ((newlineIndex = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, newlineIndex).trim();
+      buffer = buffer.slice(newlineIndex + 1);
+  
+      if (line) {
+        try {
+          const result = JSON.parse(line);
+          onSelection(result, processedText => {
+            helper.stdin.write(processedText + '\n');
+          });
+        } catch (e) {
+          console.error('Invalid JSON line:', line);
+          console.error(e);
+        }
+      }
+    }
   });
+
+  
 
   helper.stderr.on('data', data => {
     console.error(`stderr: ${data}`);

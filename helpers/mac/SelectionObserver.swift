@@ -8,8 +8,23 @@ var lastPopupPosition: CGPoint? = nil
 var popupShown: Bool = false
 var lastSelectionText: String = ""
 
+// Keep track of the last signal sent (as a string, to compare easily)
+var lastSentSignal: String?
+
 // Declare a global handler to call when selection should be checked
 var selectionChangedHandler: (() -> Void)?
+
+// Helper to send signals only if changed
+func sendSignalIfChanged(_ dict: [String: Any]) {
+    if let jsonData = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys]),
+       let jsonString = String(data: jsonData, encoding: .utf8) {
+        if jsonString != lastSentSignal {
+            print(jsonString, terminator: "\n")
+            fflush(stdout)
+            lastSentSignal = jsonString
+        }
+    }
+}
 
 // Top-level C callback for event tap
 private func globalMouseEventCallback(
@@ -30,17 +45,13 @@ private func globalMouseEventCallback(
         if popupShown, let popupPos = lastPopupPosition {
             let dx = abs(pos.x - popupPos.x)
             let dy = abs(pos.y - popupPos.y)
-            if dx > 100 || dy > 100 {
-                // Emit close signal, only once
+            if dx > 300 || dy > 500 {
+                // Emit close signal, only once and only if different
                 let empty: [String: Any] = [
                     "text": "",
                     "position": ["x": pos.x, "y": pos.y]
                 ]
-                if let jsonData = try? JSONSerialization.data(withJSONObject: empty),
-                   let jsonString = String(data: jsonData, encoding: .utf8) {
-                    print(jsonString, terminator: "\n")
-                    fflush(stdout)
-                }
+                sendSignalIfChanged(empty)
                 popupShown = false
                 lastPopupPosition = nil
                 lastSelectionText = ""
@@ -214,12 +225,8 @@ class SelectionObserver {
                     }
                     popupShown = true
 
-                    // Print popup signal
-                    if let jsonData = try? JSONSerialization.data(withJSONObject: selection),
-                        let jsonString = String(data: jsonData, encoding: .utf8) {
-                        print(jsonString, terminator: "\n")
-                        fflush(stdout)
-                    }
+                    // Print popup signal only if different
+                    sendSignalIfChanged(selection)
                 }
             } else {
                 // Text is empty, i.e. deselected
@@ -229,11 +236,7 @@ class SelectionObserver {
                         "text": "",
                         "position": ["x": mouseLocation.x, "y": mouseLocation.y]
                     ]
-                    if let jsonData = try? JSONSerialization.data(withJSONObject: empty),
-                        let jsonString = String(data: jsonData, encoding: .utf8) {
-                        print(jsonString, terminator: "\n")
-                        fflush(stdout)
-                    }
+                    sendSignalIfChanged(empty)
                     popupShown = false
                     lastPopupPosition = nil
                     lastSelectionText = ""
@@ -247,11 +250,7 @@ class SelectionObserver {
                     "text": "",
                     "position": ["x": mouseLocation.x, "y": mouseLocation.y]
                 ]
-                if let jsonData = try? JSONSerialization.data(withJSONObject: empty),
-                    let jsonString = String(data: jsonData, encoding: .utf8) {
-                    print(jsonString, terminator: "\n")
-                    fflush(stdout)
-                }
+                sendSignalIfChanged(empty)
                 popupShown = false
                 lastPopupPosition = nil
                 lastSelectionText = ""
