@@ -14,6 +14,21 @@ var lastSentSignal: String?
 // Declare a global handler to call when selection should be checked
 var selectionChangedHandler: (() -> Void)?
 
+// Utility: Get the mouse position in top-left screen coordinates
+func currentMouseTopLeftPosition() -> (x: CGFloat, y: CGFloat) {
+    let mouseLocation = NSEvent.mouseLocation
+    // Find the screen under the mouse, fallback to main
+    let screen = NSScreen.screens.first(where: { NSMouseInRect(mouseLocation, $0.frame, false) }) ?? NSScreen.main
+    guard let screenFrame = screen?.frame else {
+        // Fallback: Just flip y using main screen height
+        let h = NSScreen.main?.frame.height ?? 0
+        return (mouseLocation.x, h - mouseLocation.y)
+    }
+    // In macOS, Y increases upwards, so top-left is (x, screenHeight - (y - screenY))
+    let flippedY = screenFrame.origin.y + screenFrame.size.height - mouseLocation.y
+    return (mouseLocation.x, flippedY)
+}
+
 // Helper to send signals only if changed
 func sendSignalIfChanged(_ dict: [String: Any]) {
     if let jsonData = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys]),
@@ -34,6 +49,8 @@ private func globalMouseEventCallback(
     refcon: UnsafeMutableRawPointer?
 ) -> Unmanaged<CGEvent>? {
     let pos = event.location
+    // Flip Y for popup compatibility
+    let mousePos = currentMouseTopLeftPosition()
 
     if type == .leftMouseUp || type == .rightMouseUp {
         // On mouseup, check for a selection change
@@ -45,11 +62,11 @@ private func globalMouseEventCallback(
         if popupShown, let popupPos = lastPopupPosition {
             let dx = abs(pos.x - popupPos.x)
             let dy = abs(pos.y - popupPos.y)
-            if dx > 300 || dy > 500 {
+            if dx > 100 || dy > 100 {
                 // Emit close signal, only once and only if different
                 let empty: [String: Any] = [
                     "text": "",
-                    "position": ["x": pos.x, "y": pos.y]
+                    "position": ["x": mousePos.x, "y": mousePos.y]
                 ]
                 sendSignalIfChanged(empty)
                 popupShown = false
@@ -180,11 +197,11 @@ class SelectionObserver {
             var selectedTextRef: CFTypeRef?
             if AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
                 let selectedText = selectedTextRef as? String {
-                // Get mouse location for popup
-                let mouseLocation = NSEvent.mouseLocation
+                // Get mouse location for popup (flipped Y)
+                let mousePos = currentMouseTopLeftPosition()
                 return [
                     "text": selectedText,
-                    "position": ["x": mouseLocation.x, "y": mouseLocation.y],
+                    "position": ["x": mousePos.x, "y": mousePos.y],
                     "editable": isEditable
                 ]
             }
@@ -198,10 +215,10 @@ class SelectionObserver {
             var selectedTextRef: CFTypeRef?
             if AXUIElementCopyAttributeValue(windowElement, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
                 let selectedText = selectedTextRef as? String {
-                let mouseLocation = NSEvent.mouseLocation
+                let mousePos = currentMouseTopLeftPosition()
                 return [
                     "text": selectedText,
-                    "position": ["x": mouseLocation.x, "y": mouseLocation.y],
+                    "position": ["x": mousePos.x, "y": mousePos.y],
                     "editable": false
                 ]
             }
@@ -231,10 +248,10 @@ class SelectionObserver {
             } else {
                 // Text is empty, i.e. deselected
                 if popupShown {
-                    let mouseLocation = NSEvent.mouseLocation
+                    let mousePos = currentMouseTopLeftPosition()
                     let empty: [String: Any] = [
                         "text": "",
-                        "position": ["x": mouseLocation.x, "y": mouseLocation.y]
+                        "position": ["x": mousePos.x, "y": mousePos.y]
                     ]
                     sendSignalIfChanged(empty)
                     popupShown = false
@@ -245,10 +262,10 @@ class SelectionObserver {
         } else {
             // No selection, treat as deselection
             if popupShown {
-                let mouseLocation = NSEvent.mouseLocation
+                let mousePos = currentMouseTopLeftPosition()
                 let empty: [String: Any] = [
                     "text": "",
-                    "position": ["x": mouseLocation.x, "y": mouseLocation.y]
+                    "position": ["x": mousePos.x, "y": mousePos.y]
                 ]
                 sendSignalIfChanged(empty)
                 popupShown = false
