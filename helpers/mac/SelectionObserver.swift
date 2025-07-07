@@ -3,33 +3,24 @@
 import Cocoa
 import ApplicationServices
 
-// Track popup state
 var lastPopupPosition: CGPoint? = nil
 var popupShown: Bool = false
 var lastSelectionText: String = ""
-
-// Keep track of the last signal sent (as a string, to compare easily)
 var lastSentSignal: String?
-
-// Declare a global handler to call when selection should be checked
 var selectionChangedHandler: (() -> Void)?
+var mouseUpSelectionCheckTimer: Timer? // For delay after mouse up
 
-// Utility: Get the mouse position in top-left screen coordinates
 func currentMouseTopLeftPosition() -> (x: CGFloat, y: CGFloat) {
     let mouseLocation = NSEvent.mouseLocation
-    // Find the screen under the mouse, fallback to main
     let screen = NSScreen.screens.first(where: { NSMouseInRect(mouseLocation, $0.frame, false) }) ?? NSScreen.main
     guard let screenFrame = screen?.frame else {
-        // Fallback: Just flip y using main screen height
         let h = NSScreen.main?.frame.height ?? 0
         return (mouseLocation.x, h - mouseLocation.y)
     }
-    // In macOS, Y increases upwards, so top-left is (x, screenHeight - (y - screenY))
     let flippedY = screenFrame.origin.y + screenFrame.size.height - mouseLocation.y
     return (mouseLocation.x, flippedY)
 }
 
-// Helper to send signals only if changed
 func sendSignalIfChanged(_ dict: [String: Any]) {
     if let jsonData = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys]),
        let jsonString = String(data: jsonData, encoding: .utf8) {
@@ -41,7 +32,18 @@ func sendSignalIfChanged(_ dict: [String: Any]) {
     }
 }
 
-// Top-level C callback for event tap
+func sendResetSignal() {
+    let mousePos = currentMouseTopLeftPosition()
+    let empty: [String: Any] = [
+        "text": "",
+        "position": ["x": mousePos.x, "y": mousePos.y]
+    ]
+    sendSignalIfChanged(empty)
+    popupShown = false
+    lastPopupPosition = nil
+    lastSelectionText = ""
+}
+
 private func globalMouseEventCallback(
     proxy: CGEventTapProxy,
     type: CGEventType,
@@ -49,29 +51,22 @@ private func globalMouseEventCallback(
     refcon: UnsafeMutableRawPointer?
 ) -> Unmanaged<CGEvent>? {
     let pos = event.location
-    // Flip Y for popup compatibility
-    let mousePos = currentMouseTopLeftPosition()
+    // let mousePos = currentMouseTopLeftPosition() // <-- removed, not used
 
     if type == .leftMouseUp || type == .rightMouseUp {
-        // On mouseup, check for a selection change
-        selectionChangedHandler?()
+        // Delay the selection check to let macOS update selection state
+        mouseUpSelectionCheckTimer?.invalidate()
+        mouseUpSelectionCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { _ in
+            selectionChangedHandler?()
+        }
     }
 
     if type == .mouseMoved || type == .leftMouseDragged || type == .rightMouseDragged {
-        // Only if popup is shown
         if popupShown, let popupPos = lastPopupPosition {
             let dx = abs(pos.x - popupPos.x)
             let dy = abs(pos.y - popupPos.y)
             if dx > 100 || dy > 100 {
-                // Emit close signal, only once and only if different
-                let empty: [String: Any] = [
-                    "text": "",
-                    "position": ["x": mousePos.x, "y": mousePos.y]
-                ]
-                sendSignalIfChanged(empty)
-                popupShown = false
-                lastPopupPosition = nil
-                lastSelectionText = ""
+                sendResetSignal()
             }
         }
     }
@@ -79,7 +74,6 @@ private func globalMouseEventCallback(
     return Unmanaged.passRetained(event)
 }
 
-// Mouse event tap setup for mousemove and mouseup
 func startMouseEventListener(selectionChanged: @escaping () -> Void) {
     selectionChangedHandler = selectionChanged
 
@@ -88,7 +82,9 @@ func startMouseEventListener(selectionChanged: @escaping () -> Void) {
         (1 << CGEventType.rightMouseUp.rawValue) |
         (1 << CGEventType.mouseMoved.rawValue) |
         (1 << CGEventType.leftMouseDragged.rawValue) |
-        (1 << CGEventType.rightMouseDragged.rawValue)
+        (1 << CGEventType.rightMouseDragged.rawValue) |
+        (1 << CGEventType.leftMouseDown.rawValue) |
+        (1 << CGEventType.rightMouseDown.rawValue)
 
     let eventTap = CGEvent.tapCreate(
         tap: .cgSessionEventTap,
@@ -121,7 +117,6 @@ class SelectionObserver {
         setupObserverForFrontmostApp()
         startPolling()
 
-        // Start mouse event listener (pass in triggerIfSelectionChanged)
         startMouseEventListener { [weak self] in
             self?.triggerIfSelectionChanged()
         }
@@ -164,7 +159,6 @@ class SelectionObserver {
         let pid = frontApp.processIdentifier
         let appElement = AXUIElementCreateApplication(pid)
 
-        // Helper to check if element is editable
         func isElementEditable(_ element: AXUIElement) -> Bool {
             var editableRef: CFTypeRef?
             if AXUIElementCopyAttributeValue(element, "AXEditable" as CFString, &editableRef) == .success,
@@ -186,18 +180,14 @@ class SelectionObserver {
             return false
         }
 
-        // Try focused element first (editable text)
         var focusedElementRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedElementRef) == .success,
             let focusedElement = focusedElementRef {
             let element = focusedElement as! AXUIElement
             let isEditable = isElementEditable(element)
-
-            // Try to get selected text
             var selectedTextRef: CFTypeRef?
             if AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
                 let selectedText = selectedTextRef as? String {
-                // Get mouse location for popup (flipped Y)
                 let mousePos = currentMouseTopLeftPosition()
                 return [
                     "text": selectedText,
@@ -207,7 +197,6 @@ class SelectionObserver {
             }
         }
 
-        // Try main window for non-editable text
         var windowRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &windowRef) == .success,
             let window = windowRef {
@@ -223,7 +212,6 @@ class SelectionObserver {
                 ]
             }
         }
-
         return nil
     }
 
@@ -231,46 +219,24 @@ class SelectionObserver {
         if let selection = SelectionObserver.currentSelection(),
             let selectedText = selection["text"] as? String {
             if !selectedText.isEmpty {
-                // Only emit if text actually changed (and is not empty)
                 if selectedText != lastSelectionText {
                     lastSelectionText = selectedText
-                    // Get position
                     if let position = selection["position"] as? [String: Any],
                         let x = position["x"] as? CGFloat,
                         let y = position["y"] as? CGFloat {
                         lastPopupPosition = CGPoint(x: x, y: y)
                     }
                     popupShown = true
-
-                    // Print popup signal only if different
                     sendSignalIfChanged(selection)
                 }
             } else {
-                // Text is empty, i.e. deselected
                 if popupShown {
-                    let mousePos = currentMouseTopLeftPosition()
-                    let empty: [String: Any] = [
-                        "text": "",
-                        "position": ["x": mousePos.x, "y": mousePos.y]
-                    ]
-                    sendSignalIfChanged(empty)
-                    popupShown = false
-                    lastPopupPosition = nil
-                    lastSelectionText = ""
+                    sendResetSignal()
                 }
             }
         } else {
-            // No selection, treat as deselection
             if popupShown {
-                let mousePos = currentMouseTopLeftPosition()
-                let empty: [String: Any] = [
-                    "text": "",
-                    "position": ["x": mousePos.x, "y": mousePos.y]
-                ]
-                sendSignalIfChanged(empty)
-                popupShown = false
-                lastPopupPosition = nil
-                lastSelectionText = ""
+                sendResetSignal()
             }
         }
     }
