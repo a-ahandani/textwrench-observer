@@ -1,11 +1,10 @@
-const { startSelectionObserver } = require('..');
+const { onSelection, paste  } = require('..');
 
-startSelectionObserver((selection, paste) => {
-  console.log('Received selection:', selection);
-
-  // Example: processing logic
-  // const processedText = selection.text.toUpperCase();
-
-  // // Return processed text to paste
-  // paste(processedText);
+// Listen for new selections
+onSelection(selection => {
+  // Do whatever with selection
+  // You do NOT need to call paste here
+  // Later, in any other part of your app:
+  console.log("Selection changed:", selection.text);
 });
+paste("my processed string to paste!");
