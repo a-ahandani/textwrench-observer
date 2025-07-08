@@ -157,7 +157,7 @@ func startMouseEventListener(selectionChanged: @escaping () -> Void) {
     }
 }
 
-// --- Selection Observer (changed: records if selection was editable) ---
+// --- Selection Observer (changed: NO AX notification, ONLY mouse triggers) ---
 class SelectionObserver {
     private var timer: Timer?
 
@@ -168,7 +168,7 @@ class SelectionObserver {
             name: NSWorkspace.didActivateApplicationNotification,
             object: nil
         )
-        setupObserverForFrontmostApp()
+        // No need to call setupObserverForFrontmostApp for AX notifications.
         startPolling()
 
         startMouseEventListener { [weak self] in
@@ -179,34 +179,12 @@ class SelectionObserver {
     }
 
     @objc func focusedAppChanged(_ notification: Notification? = nil) {
-        setupObserverForFrontmostApp()
+        // Do nothing for focus change.
     }
 
+    // This is left as a stub; you don't need to observe AX notifications.
     func setupObserverForFrontmostApp() {
-        guard let frontApp = NSWorkspace.shared.frontmostApplication else { return }
-        let pid = frontApp.processIdentifier
-
-        var observer: AXObserver?
-        let observerCallback: AXObserverCallback = { observer, element, notification, refcon in
-            let instance = Unmanaged<SelectionObserver>.fromOpaque(refcon!).takeUnretainedValue()
-            instance.triggerIfSelectionChanged()
-        }
-        let refcon = Unmanaged.passUnretained(self).toOpaque()
-        AXObserverCreate(pid, observerCallback, &observer)
-
-        guard let observer = observer else { return }
-        let source = AXObserverGetRunLoopSource(observer)
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .defaultMode)
-
-        let appElement = AXUIElementCreateApplication(pid)
-        var focusedElementRef: CFTypeRef?
-        AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedElementRef)
-
-        if let focusedElement = focusedElementRef {
-            AXObserverAddNotification(observer, focusedElement as! AXUIElement, kAXSelectedTextChangedNotification as CFString, refcon)
-            AXObserverAddNotification(observer, appElement, kAXFocusedUIElementChangedNotification as CFString, refcon)
-        }
-        self.triggerIfSelectionChanged()
+        // No AXObserver needed.
     }
 
     static func currentSelection() -> [String: Any]? {
