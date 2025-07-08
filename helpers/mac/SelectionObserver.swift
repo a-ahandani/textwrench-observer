@@ -44,6 +44,49 @@ func sendResetSignal() {
     lastSelectionText = ""
 }
 
+// --- Keyboard event handling ---
+var lastSelectionEditable: Bool = false
+var suppressNextKeyDeselect: Bool = false
+
+private func globalKeyboardEventCallback(
+    proxy: CGEventTapProxy,
+    type: CGEventType,
+    event: CGEvent,
+    refcon: UnsafeMutableRawPointer?
+) -> Unmanaged<CGEvent>? {
+    // Only keyDown (ignore keyUp)
+    guard type == .keyDown else { return Unmanaged.passRetained(event) }
+
+    // If there is a selection and it's in an editable field, and popup is shown, send deselect signal
+    if popupShown, !lastSelectionText.isEmpty, lastSelectionEditable {
+        sendResetSignal()
+        // Optionally, suppress sending a reset signal for subsequent keyDowns until next selection
+        suppressNextKeyDeselect = true
+    }
+    return Unmanaged.passRetained(event)
+}
+
+func startKeyboardEventListener() {
+    let keyEventMask = (1 << CGEventType.keyDown.rawValue)
+
+    let eventTap = CGEvent.tapCreate(
+        tap: .cgSessionEventTap,
+        place: .headInsertEventTap,
+        options: .defaultTap,
+        eventsOfInterest: CGEventMask(keyEventMask),
+        callback: globalKeyboardEventCallback,
+        userInfo: nil
+    )
+    if let eventTap = eventTap {
+        let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
+        CGEvent.tapEnable(tap: eventTap, enable: true)
+    } else {
+        print("Failed to create event tap for keyboard events.")
+    }
+}
+
+// --- Mouse event handling (unchanged) ---
 private func globalMouseEventCallback(
     proxy: CGEventTapProxy,
     type: CGEventType,
@@ -51,7 +94,6 @@ private func globalMouseEventCallback(
     refcon: UnsafeMutableRawPointer?
 ) -> Unmanaged<CGEvent>? {
     let pos = event.location
-    // let mousePos = currentMouseTopLeftPosition() // <-- removed, not used
 
     if type == .leftMouseUp || type == .rightMouseUp {
         // Delay the selection check to let macOS update selection state
@@ -104,6 +146,7 @@ func startMouseEventListener(selectionChanged: @escaping () -> Void) {
     }
 }
 
+// --- Selection Observer (changed: records if selection was editable) ---
 class SelectionObserver {
     private var timer: Timer?
 
@@ -120,6 +163,7 @@ class SelectionObserver {
         startMouseEventListener { [weak self] in
             self?.triggerIfSelectionChanged()
         }
+        startKeyboardEventListener()
         listenForProcessedText()
     }
 
@@ -218,6 +262,8 @@ class SelectionObserver {
     func triggerIfSelectionChanged() {
         if let selection = SelectionObserver.currentSelection(),
             let selectedText = selection["text"] as? String {
+            let editable = (selection["editable"] as? Bool) ?? false
+            lastSelectionEditable = editable
             if !selectedText.isEmpty {
                 if selectedText != lastSelectionText {
                     lastSelectionText = selectedText
@@ -228,15 +274,18 @@ class SelectionObserver {
                     }
                     popupShown = true
                     sendSignalIfChanged(selection)
+                    suppressNextKeyDeselect = false // allow keyboard handler again
                 }
             } else {
                 if popupShown {
                     sendResetSignal()
+                    suppressNextKeyDeselect = false
                 }
             }
         } else {
             if popupShown {
                 sendResetSignal()
+                suppressNextKeyDeselect = false
             }
         }
     }
