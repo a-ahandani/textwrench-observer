@@ -8,10 +8,10 @@ var popupShown: Bool = false
 var lastSelectionText: String = ""
 var lastSentSignal: String?
 var selectionChangedHandler: (() -> Void)?
-var mouseUpSelectionCheckTimer: Timer? // For delay after mouse up
-
-// --- New: Global reset timer for debounced reset signal
+var mouseUpSelectionCheckTimer: Timer?
 var resetSignalTimer: Timer?
+var lastSelectionEditable: Bool = false
+var suppressNextKeyDeselect: Bool = false
 
 func currentMouseTopLeftPosition() -> (x: CGFloat, y: CGFloat) {
     let mouseLocation = NSEvent.mouseLocation
@@ -35,7 +35,6 @@ func sendSignalIfChanged(_ dict: [String: Any]) {
     }
 }
 
-// --- New: Delayed reset signal sender with debounce
 func sendResetSignalWithDelay(_ delay: TimeInterval = 0.3) {
     resetSignalTimer?.invalidate()
     resetSignalTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { _ in
@@ -43,7 +42,6 @@ func sendResetSignalWithDelay(_ delay: TimeInterval = 0.3) {
     }
 }
 
-// --- Modified: sendResetSignal now private/internal
 func sendResetSignal() {
     let mousePos = currentMouseTopLeftPosition()
     let empty: [String: Any] = [
@@ -56,48 +54,6 @@ func sendResetSignal() {
     lastSelectionText = ""
 }
 
-// --- Keyboard event handling ---
-var lastSelectionEditable: Bool = false
-var suppressNextKeyDeselect: Bool = false
-
-private func globalKeyboardEventCallback(
-    proxy: CGEventTapProxy,
-    type: CGEventType,
-    event: CGEvent,
-    refcon: UnsafeMutableRawPointer?
-) -> Unmanaged<CGEvent>? {
-    // Only keyDown (ignore keyUp)
-    guard type == .keyDown else { return Unmanaged.passRetained(event) }
-
-    // If there is a selection and it's in an editable field, and popup is shown, send deselect signal
-    if popupShown, !lastSelectionText.isEmpty, lastSelectionEditable {
-        sendResetSignalWithDelay()
-        suppressNextKeyDeselect = true
-    }
-    return Unmanaged.passRetained(event)
-}
-
-func startKeyboardEventListener() {
-    let keyEventMask = (1 << CGEventType.keyDown.rawValue)
-
-    let eventTap = CGEvent.tapCreate(
-        tap: .cgSessionEventTap,
-        place: .headInsertEventTap,
-        options: .defaultTap,
-        eventsOfInterest: CGEventMask(keyEventMask),
-        callback: globalKeyboardEventCallback,
-        userInfo: nil
-    )
-    if let eventTap = eventTap {
-        let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
-        CGEvent.tapEnable(tap: eventTap, enable: true)
-    } else {
-        print("Failed to create event tap for keyboard events.")
-    }
-}
-
-// --- Mouse event handling (unchanged except for reset signal) ---
 private func globalMouseEventCallback(
     proxy: CGEventTapProxy,
     type: CGEventType,
@@ -107,7 +63,7 @@ private func globalMouseEventCallback(
     let pos = event.location
 
     if type == .leftMouseUp || type == .rightMouseUp {
-        // Delay the selection check to let macOS update selection state
+        // Only trigger selection check after mouse up!
         mouseUpSelectionCheckTimer?.invalidate()
         mouseUpSelectionCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { _ in
             selectionChangedHandler?()
@@ -157,34 +113,45 @@ func startMouseEventListener(selectionChanged: @escaping () -> Void) {
     }
 }
 
-// --- Selection Observer (changed: NO AX notification, ONLY mouse triggers) ---
 class SelectionObserver {
-    private var timer: Timer?
-
     init() {
-        NSWorkspace.shared.notificationCenter.addObserver(
-            self,
-            selector: #selector(focusedAppChanged),
-            name: NSWorkspace.didActivateApplicationNotification,
-            object: nil
-        )
-        // No need to call setupObserverForFrontmostApp for AX notifications.
-        startPolling()
-
+        // No workspace notification, no polling, just mouse up!
         startMouseEventListener { [weak self] in
             self?.triggerIfSelectionChanged()
         }
-        startKeyboardEventListener()
         listenForProcessedText()
     }
 
-    @objc func focusedAppChanged(_ notification: Notification? = nil) {
-        // Do nothing for focus change.
-    }
-
-    // This is left as a stub; you don't need to observe AX notifications.
-    func setupObserverForFrontmostApp() {
-        // No AXObserver needed.
+    // The ONLY place this is called is after mouse up!
+    func triggerIfSelectionChanged() {
+        if let selection = SelectionObserver.currentSelection(),
+            let selectedText = selection["text"] as? String {
+            let editable = (selection["editable"] as? Bool) ?? false
+            lastSelectionEditable = editable
+            if !selectedText.isEmpty {
+                if selectedText != lastSelectionText {
+                    lastSelectionText = selectedText
+                    if let position = selection["position"] as? [String: Any],
+                        let x = position["x"] as? CGFloat,
+                        let y = position["y"] as? CGFloat {
+                        lastPopupPosition = CGPoint(x: x, y: y)
+                    }
+                    popupShown = true
+                    sendSignalIfChanged(selection)
+                    suppressNextKeyDeselect = false
+                }
+            } else {
+                if popupShown {
+                    sendResetSignalWithDelay()
+                    suppressNextKeyDeselect = false
+                }
+            }
+        } else {
+            if popupShown {
+                sendResetSignalWithDelay()
+                suppressNextKeyDeselect = false
+            }
+        }
     }
 
     static func currentSelection() -> [String: Any]? {
@@ -246,43 +213,6 @@ class SelectionObserver {
             }
         }
         return nil
-    }
-
-    func triggerIfSelectionChanged() {
-        if let selection = SelectionObserver.currentSelection(),
-            let selectedText = selection["text"] as? String {
-            let editable = (selection["editable"] as? Bool) ?? false
-            lastSelectionEditable = editable
-            if !selectedText.isEmpty {
-                if selectedText != lastSelectionText {
-                    lastSelectionText = selectedText
-                    if let position = selection["position"] as? [String: Any],
-                        let x = position["x"] as? CGFloat,
-                        let y = position["y"] as? CGFloat {
-                        lastPopupPosition = CGPoint(x: x, y: y)
-                    }
-                    popupShown = true
-                    sendSignalIfChanged(selection)
-                    suppressNextKeyDeselect = false // allow keyboard handler again
-                }
-            } else {
-                if popupShown {
-                    sendResetSignalWithDelay()
-                    suppressNextKeyDeselect = false
-                }
-            }
-        } else {
-            if popupShown {
-                sendResetSignalWithDelay()
-                suppressNextKeyDeselect = false
-            }
-        }
-    }
-
-    func startPolling() {
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
-            // Polling for completeness; main logic is in event tap
-        }
     }
 
     func listenForProcessedText() {
