@@ -10,6 +10,9 @@ var lastSentSignal: String?
 var selectionChangedHandler: (() -> Void)?
 var mouseUpSelectionCheckTimer: Timer? // For delay after mouse up
 
+// --- New: Global reset timer for debounced reset signal
+var resetSignalTimer: Timer?
+
 func currentMouseTopLeftPosition() -> (x: CGFloat, y: CGFloat) {
     let mouseLocation = NSEvent.mouseLocation
     let screen = NSScreen.screens.first(where: { NSMouseInRect(mouseLocation, $0.frame, false) }) ?? NSScreen.main
@@ -32,6 +35,15 @@ func sendSignalIfChanged(_ dict: [String: Any]) {
     }
 }
 
+// --- New: Delayed reset signal sender with debounce
+func sendResetSignalWithDelay(_ delay: TimeInterval = 0.3) {
+    resetSignalTimer?.invalidate()
+    resetSignalTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { _ in
+        sendResetSignal()
+    }
+}
+
+// --- Modified: sendResetSignal now private/internal
 func sendResetSignal() {
     let mousePos = currentMouseTopLeftPosition()
     let empty: [String: Any] = [
@@ -59,8 +71,7 @@ private func globalKeyboardEventCallback(
 
     // If there is a selection and it's in an editable field, and popup is shown, send deselect signal
     if popupShown, !lastSelectionText.isEmpty, lastSelectionEditable {
-        sendResetSignal()
-        // Optionally, suppress sending a reset signal for subsequent keyDowns until next selection
+        sendResetSignalWithDelay()
         suppressNextKeyDeselect = true
     }
     return Unmanaged.passRetained(event)
@@ -86,7 +97,7 @@ func startKeyboardEventListener() {
     }
 }
 
-// --- Mouse event handling (unchanged) ---
+// --- Mouse event handling (unchanged except for reset signal) ---
 private func globalMouseEventCallback(
     proxy: CGEventTapProxy,
     type: CGEventType,
@@ -107,8 +118,8 @@ private func globalMouseEventCallback(
         if popupShown, let popupPos = lastPopupPosition {
             let dx = abs(pos.x - popupPos.x)
             let dy = abs(pos.y - popupPos.y)
-            if dx > 800 || dy > 800 {
-                sendResetSignal()
+            if dx > 400 || dy > 400 {
+                sendResetSignalWithDelay()
             }
         }
     }
@@ -278,13 +289,13 @@ class SelectionObserver {
                 }
             } else {
                 if popupShown {
-                    sendResetSignal()
+                    sendResetSignalWithDelay()
                     suppressNextKeyDeselect = false
                 }
             }
         } else {
             if popupShown {
-                sendResetSignal()
+                sendResetSignalWithDelay()
                 suppressNextKeyDeselect = false
             }
         }
