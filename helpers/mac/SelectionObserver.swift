@@ -107,7 +107,7 @@ private func globalMouseEventCallback(
         if popupShown, let popupPos = lastPopupPosition {
             let dx = abs(pos.x - popupPos.x)
             let dy = abs(pos.y - popupPos.y)
-            if dx > 100 || dy > 100 {
+            if dx > 800 || dy > 800 {
                 sendResetSignal()
             }
         }
