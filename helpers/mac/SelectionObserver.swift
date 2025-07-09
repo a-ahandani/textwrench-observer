@@ -7,10 +7,12 @@ var lastPopupPosition: CGPoint? = nil
 var popupShown: Bool = false
 var lastSelectionText: String = ""
 var lastSentSignal: String?
-var selectionChangedHandler: (() -> Void)?
+var selectionChangedHandler: ((Bool) -> Void)?
 var mouseUpSelectionCheckTimer: Timer?
 var mouseIsDragging = false
 var pendingSelectionWasDrag = false
+var pendingSelectionIsDoubleOrTripleClick = false
+var lastMouseClickCount: Int = 0
 
 func currentMouseTopLeftPosition() -> (x: CGFloat, y: CGFloat) {
     let mouseLocation = NSEvent.mouseLocation
@@ -58,6 +60,8 @@ private func globalMouseEventCallback(
     case .leftMouseDown, .rightMouseDown:
         mouseIsDragging = false
         pendingSelectionWasDrag = false
+        pendingSelectionIsDoubleOrTripleClick = false
+        lastMouseClickCount = Int(event.getIntegerValueField(.mouseEventClickState))
 
     case .leftMouseDragged, .rightMouseDragged:
         mouseIsDragging = true
@@ -65,11 +69,18 @@ private func globalMouseEventCallback(
     case .leftMouseUp, .rightMouseUp:
         mouseUpSelectionCheckTimer?.invalidate()
         let wasDrag = mouseIsDragging
+        let clickCount = Int(event.getIntegerValueField(.mouseEventClickState))
+        // If double or triple click, treat as a selection gesture.
+        let isDoubleOrTripleClick = (clickCount == 2 || clickCount == 3)
         pendingSelectionWasDrag = wasDrag
+        pendingSelectionIsDoubleOrTripleClick = isDoubleOrTripleClick
+
         mouseUpSelectionCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { _ in
-            selectionChangedHandler?()
+            selectionChangedHandler?(pendingSelectionWasDrag || pendingSelectionIsDoubleOrTripleClick)
         }
         mouseIsDragging = false
+        pendingSelectionWasDrag = false
+        pendingSelectionIsDoubleOrTripleClick = false
 
     case .mouseMoved:
         if popupShown, let popupPos = lastPopupPosition {
@@ -85,7 +96,7 @@ private func globalMouseEventCallback(
     return Unmanaged.passRetained(event)
 }
 
-func startMouseEventListener(selectionChanged: @escaping () -> Void) {
+func startMouseEventListener(selectionChanged: @escaping (Bool) -> Void) {
     selectionChangedHandler = selectionChanged
 
     let mouseEventMask =
@@ -119,8 +130,8 @@ class SelectionObserver {
     private var timer: Timer?
 
     init() {
-        startMouseEventListener { [weak self] in
-            self?.triggerIfSelectionChanged(mouseDrag: pendingSelectionWasDrag)
+        startMouseEventListener { [weak self] isSelectionGesture in
+            self?.triggerIfSelectionChanged(selectionGesture: isSelectionGesture)
         }
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
@@ -174,13 +185,13 @@ class SelectionObserver {
         return nil
     }
 
-    // mouseDrag: true only if user just did a drag; false for regular clicks
-    func triggerIfSelectionChanged(mouseDrag: Bool) {
+    // selectionGesture: true for drag, double, or triple click; false for normal click
+    func triggerIfSelectionChanged(selectionGesture: Bool) {
         let selection = SelectionObserver.currentSelection()
         let selectedText = selection?["text"] as? String ?? ""
 
-        if mouseDrag {
-            // Only send selection if this was a drag AND selection is not empty and changed
+        if selectionGesture {
+            // Send selection if text is selected and changed
             if !selectedText.isEmpty, selectedText != lastSelectionText {
                 lastSelectionText = selectedText
                 if let position = selection?["position"] as? [String: Any],
@@ -191,7 +202,7 @@ class SelectionObserver {
                 popupShown = true
                 sendSignalIfChanged(selection!)
             }
-            // If after drag, selection is empty, clear any shown popup
+            // If after a gesture, selection is empty, clear any shown popup
             else if selectedText.isEmpty, popupShown {
                 sendResetSignal()
             }
@@ -200,7 +211,7 @@ class SelectionObserver {
             if selectedText.isEmpty, popupShown {
                 sendResetSignal()
             }
-            // If selection remains, and it's just a click, do nothing (no sending selection on header/toolbox click)
+            // If selection remains and this was just a click, do nothing (don't send selected text)
         }
     }
 
