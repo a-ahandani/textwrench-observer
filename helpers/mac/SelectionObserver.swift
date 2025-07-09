@@ -45,7 +45,6 @@ func sendResetSignal() {
     lastSelectionText = ""
 }
 
-// --- Mouse event handling (fires on drag, or on deselection) ---
 private func globalMouseEventCallback(
     proxy: CGEventTapProxy,
     type: CGEventType,
@@ -64,24 +63,9 @@ private func globalMouseEventCallback(
     case .leftMouseUp, .rightMouseUp:
         mouseUpSelectionCheckTimer?.invalidate()
         mouseUpSelectionCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { _ in
-            // If a drag happened, check for selection. If not, check for deselection.
-            if mouseIsDragging {
-                selectionChangedHandler?()
-            } else {
-                // On click with no drag, check if selection was cleared
-                if let selection = SelectionObserver.currentSelection(),
-                   let selectedText = selection["text"] as? String,
-                   !selectedText.isEmpty {
-                    // Still selected, do nothing
-                } else {
-                    // Selection cleared
-                    if popupShown {
-                        sendResetSignal()
-                    }
-                }
-            }
+            selectionChangedHandler?()
         }
-        mouseIsDragging = false // reset after mouse up
+        mouseIsDragging = false
 
     case .mouseMoved:
         if popupShown, let popupPos = lastPopupPosition {
@@ -127,16 +111,13 @@ func startMouseEventListener(selectionChanged: @escaping () -> Void) {
     }
 }
 
-// --- Selection Observer (Mouse-Only Version + Focus Change Detection) ---
 class SelectionObserver {
     private var timer: Timer?
 
     init() {
-        // Mouse-based selection/deselection
         startMouseEventListener { [weak self] in
             self?.triggerIfSelectionChanged()
         }
-        // Focus change (app/window switch) triggers deselect/close
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
             selector: #selector(windowFocusChanged),
@@ -189,7 +170,6 @@ class SelectionObserver {
         return nil
     }
 
-    // Only called after mouse up following a drag!
     func triggerIfSelectionChanged() {
         if let selection = SelectionObserver.currentSelection(),
            let selectedText = selection["text"] as? String {
