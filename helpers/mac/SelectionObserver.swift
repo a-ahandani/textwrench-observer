@@ -56,7 +56,7 @@ private func globalMouseEventCallback(
     if type == .leftMouseUp || type == .rightMouseUp {
         // Delay the selection check to let macOS update selection state
         mouseUpSelectionCheckTimer?.invalidate()
-        mouseUpSelectionCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { _ in
+        mouseUpSelectionCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: false) { _ in
             selectionChangedHandler?()
         }
     }
