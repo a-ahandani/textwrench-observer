@@ -45,7 +45,7 @@ func sendResetSignal() {
     lastSelectionText = ""
 }
 
-// --- Mouse event handling (only fires on actual drags) ---
+// --- Mouse event handling (fires on drag, or on deselection) ---
 private func globalMouseEventCallback(
     proxy: CGEventTapProxy,
     type: CGEventType,
@@ -63,10 +63,22 @@ private func globalMouseEventCallback(
 
     case .leftMouseUp, .rightMouseUp:
         mouseUpSelectionCheckTimer?.invalidate()
-        // Only fire if it was a drag (actual selection gesture)
-        if mouseIsDragging {
-            mouseUpSelectionCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { _ in
+        mouseUpSelectionCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { _ in
+            // If a drag happened, check for selection. If not, check for deselection.
+            if mouseIsDragging {
                 selectionChangedHandler?()
+            } else {
+                // On click with no drag, check if selection was cleared
+                if let selection = SelectionObserver.currentSelection(),
+                   let selectedText = selection["text"] as? String,
+                   !selectedText.isEmpty {
+                    // Still selected, do nothing
+                } else {
+                    // Selection cleared
+                    if popupShown {
+                        sendResetSignal()
+                    }
+                }
             }
         }
         mouseIsDragging = false // reset after mouse up
@@ -115,16 +127,29 @@ func startMouseEventListener(selectionChanged: @escaping () -> Void) {
     }
 }
 
-// --- Selection Observer (Mouse-Only Version) ---
+// --- Selection Observer (Mouse-Only Version + Focus Change Detection) ---
 class SelectionObserver {
     private var timer: Timer?
 
     init() {
-        // Only use mouse event listener
+        // Mouse-based selection/deselection
         startMouseEventListener { [weak self] in
             self?.triggerIfSelectionChanged()
         }
+        // Focus change (app/window switch) triggers deselect/close
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(windowFocusChanged),
+            name: NSWorkspace.didActivateApplicationNotification,
+            object: nil
+        )
         listenForProcessedText()
+    }
+
+    @objc func windowFocusChanged(_ notification: Notification? = nil) {
+        if popupShown {
+            sendResetSignal()
+        }
     }
 
     static func currentSelection() -> [String: Any]? {
@@ -132,32 +157,10 @@ class SelectionObserver {
         let pid = frontApp.processIdentifier
         let appElement = AXUIElementCreateApplication(pid)
 
-        func isElementEditable(_ element: AXUIElement) -> Bool {
-            var editableRef: CFTypeRef?
-            if AXUIElementCopyAttributeValue(element, "AXEditable" as CFString, &editableRef) == .success,
-                let isEditable = editableRef as? Bool {
-                return isEditable
-            }
-            var roleRef: CFTypeRef?
-            if AXUIElementCopyAttributeValue(element, "AXRole" as CFString, &roleRef) == .success,
-                let role = roleRef as? String {
-                let editableRoles = ["AXTextArea", "AXTextField"]
-                if editableRoles.contains(role) {
-                    return true
-                }
-            }
-            var settable: DarwinBoolean = false
-            if AXUIElementIsAttributeSettable(element, "AXValue" as CFString, &settable) == .success {
-                return settable.boolValue
-            }
-            return false
-        }
-
         var focusedElementRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedElementRef) == .success,
             let focusedElement = focusedElementRef {
             let element = focusedElement as! AXUIElement
-            let _ = isElementEditable(element)
             var selectedTextRef: CFTypeRef?
             if AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
                 let selectedText = selectedTextRef as? String {
