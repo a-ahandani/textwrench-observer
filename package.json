@@ -1,6 +1,6 @@
 {
     "name": "textwrench-observer",
-    "version": "2.16.0",
+    "version": "2.17.0",
     "description": "Cross-platform (Mac/Win) library to get OS-level text selection, process it, and paste automatically.",
     "main": "index.js",
     "scripts": {
