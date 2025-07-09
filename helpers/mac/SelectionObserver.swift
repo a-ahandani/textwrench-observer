@@ -172,26 +172,120 @@ class SelectionObserver {
         return nil
     }
 
+    static func getSelectedTextViaClipboard() -> String? {
+        // Save current clipboard content
+        let pasteboard = NSPasteboard.general
+        let originalContent = pasteboard.string(forType: .string)
+        let originalChangeCount = pasteboard.changeCount
+        
+        // Clear clipboard and wait for it to be cleared
+        pasteboard.clearContents()
+        
+        // Try to ensure focus is on the current app/window
+        let currentApp = NSWorkspace.shared.frontmostApplication
+        currentApp?.activate(options: [])
+        
+        // Small delay to ensure focus
+        usleep(50000) // 50ms
+        
+        // Send Cmd+C to copy selection - try multiple times if needed
+        let src = CGEventSource(stateID: .hidSystemState)
+        let loc = CGEventTapLocation.cghidEventTap
+        
+        // Try sending the copy command
+        for attempt in 1...3 {
+            let keyCDown = CGEvent(keyboardEventSource: src, virtualKey: 8, keyDown: true)
+            keyCDown?.flags = .maskCommand
+            let keyCUp = CGEvent(keyboardEventSource: src, virtualKey: 8, keyDown: false)
+            keyCUp?.flags = .maskCommand
+            
+            keyCDown?.post(tap: loc)
+            usleep(20000) // 20ms between key down and up
+            keyCUp?.post(tap: loc)
+            
+            // Wait for clipboard to change (with timeout)
+            let startTime = CFAbsoluteTimeGetCurrent()
+            let timeout: CFTimeInterval = 0.3 // 300ms timeout per attempt
+            
+            while CFAbsoluteTimeGetCurrent() - startTime < timeout {
+                if pasteboard.changeCount > originalChangeCount {
+                    if let copiedText = pasteboard.string(forType: .string) {
+                        NSLog("Clipboard method got text on attempt \(attempt): '\(copiedText.prefix(50))...'")
+                        
+                        // Restore original clipboard content
+                        pasteboard.clearContents()
+                        if let originalContent = originalContent {
+                            pasteboard.setString(originalContent, forType: .string)
+                        }
+                        
+                        return copiedText
+                    }
+                }
+                usleep(10000) // 10ms
+            }
+            
+            NSLog("Clipboard method attempt \(attempt) failed")
+            
+            // Small delay between attempts
+            if attempt < 3 {
+                usleep(100000) // 100ms
+            }
+        }
+        
+        NSLog("Clipboard method failed after all attempts")
+        
+        // Restore original clipboard content
+        pasteboard.clearContents()
+        if let originalContent = originalContent {
+            pasteboard.setString(originalContent, forType: .string)
+        }
+        
+        return nil
+    }
+
     /// Only send selection if drag, or double/triple click (clickCount 2 or 3)
     /// Never send on single click, even if there is a selection.
     /// Always send deselect on clear, or on window focus change.
     func handleSelectionOrDeselection(wasDrag: Bool, clickCount: Int) {
         let selection = SelectionObserver.currentSelection()
-        let selectedText = selection?["text"] as? String ?? ""
+        var selectedText = selection?["text"] as? String ?? ""
+        
+        // Debug: print accessibility API result
+        if !selectedText.isEmpty {
+            NSLog("Accessibility API got text: '\(selectedText.prefix(50))...'")
+        } else {
+            NSLog("Accessibility API got no text")
+        }
 
-        // Only send selection if actual drag, or double/triple click
-        if (wasDrag || clickCount == 2 || clickCount == 3), !selectedText.isEmpty, selectedText != lastSelectionText {
-            lastSelectionText = selectedText
-            if let position = selection?["position"] as? [String: Any],
-               let x = position["x"] as? CGFloat,
-               let y = position["y"] as? CGFloat {
-                lastPopupPosition = CGPoint(x: x, y: y)
+        // Check if text is effectively empty (empty or whitespace only)
+        let isEffectivelyEmpty = selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+
+        // Special fix: if selection is effectively empty but we have a selection gesture, try clipboard method
+        if isEffectivelyEmpty && (wasDrag || clickCount == 2 || clickCount == 3) {
+            NSLog("Trying clipboard method due to empty/whitespace accessibility result")
+            if let clipboardText = SelectionObserver.getSelectedTextViaClipboard(), !clipboardText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                selectedText = clipboardText
             }
+        }
+
+        // Only send selection if actual drag, or double/triple click, and has meaningful text
+        let hasMeaningfulText = !selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if (wasDrag || clickCount == 2 || clickCount == 3), hasMeaningfulText, selectedText != lastSelectionText {
+            NSLog("Sending selection: '\(selectedText.prefix(50))...'")
+            lastSelectionText = selectedText
+            let mousePos = currentMouseTopLeftPosition()
+            lastPopupPosition = CGPoint(x: mousePos.x, y: mousePos.y)
             popupShown = true
-            sendSignalIfChanged(selection!)
+            
+            let selectionData: [String: Any] = [
+                "text": selectedText,
+                "position": ["x": mousePos.x, "y": mousePos.y]
+            ]
+            sendSignalIfChanged(selectionData)
         }
         // Send deselect if selection is cleared and popup was up
-        else if selectedText.isEmpty, popupShown {
+        else if !hasMeaningfulText, popupShown {
+            NSLog("Sending reset signal")
             sendResetSignal()
         }
         // Else: nothing to do (no selection, and nothing was shown, or not a selection gesture)
