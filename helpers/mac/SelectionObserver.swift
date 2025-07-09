@@ -7,12 +7,9 @@ var lastPopupPosition: CGPoint? = nil
 var popupShown: Bool = false
 var lastSelectionText: String = ""
 var lastSentSignal: String?
-var selectionChangedHandler: ((Bool) -> Void)?
+var selectionChangedHandler: (() -> Void)?
 var mouseUpSelectionCheckTimer: Timer?
 var mouseIsDragging = false
-var pendingSelectionWasDrag = false
-var pendingSelectionIsDoubleOrTripleClick = false
-var lastMouseClickCount: Int = 0
 
 func currentMouseTopLeftPosition() -> (x: CGFloat, y: CGFloat) {
     let mouseLocation = NSEvent.mouseLocation
@@ -59,28 +56,17 @@ private func globalMouseEventCallback(
     switch type {
     case .leftMouseDown, .rightMouseDown:
         mouseIsDragging = false
-        pendingSelectionWasDrag = false
-        pendingSelectionIsDoubleOrTripleClick = false
-        lastMouseClickCount = Int(event.getIntegerValueField(.mouseEventClickState))
 
     case .leftMouseDragged, .rightMouseDragged:
         mouseIsDragging = true
 
     case .leftMouseUp, .rightMouseUp:
         mouseUpSelectionCheckTimer?.invalidate()
-        let wasDrag = mouseIsDragging
-        let clickCount = Int(event.getIntegerValueField(.mouseEventClickState))
-        // If double or triple click, treat as a selection gesture.
-        let isDoubleOrTripleClick = (clickCount == 2 || clickCount == 3)
-        pendingSelectionWasDrag = wasDrag
-        pendingSelectionIsDoubleOrTripleClick = isDoubleOrTripleClick
-
         mouseUpSelectionCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { _ in
-            selectionChangedHandler?(pendingSelectionWasDrag || pendingSelectionIsDoubleOrTripleClick)
+            selectionChangedHandler?()
         }
         mouseIsDragging = false
-        pendingSelectionWasDrag = false
-        pendingSelectionIsDoubleOrTripleClick = false
+
 
     case .mouseMoved:
         if popupShown, let popupPos = lastPopupPosition {
@@ -96,7 +82,7 @@ private func globalMouseEventCallback(
     return Unmanaged.passRetained(event)
 }
 
-func startMouseEventListener(selectionChanged: @escaping (Bool) -> Void) {
+func startMouseEventListener(selectionChanged: @escaping () -> Void) {
     selectionChangedHandler = selectionChanged
 
     let mouseEventMask =
@@ -130,8 +116,8 @@ class SelectionObserver {
     private var timer: Timer?
 
     init() {
-        startMouseEventListener { [weak self] isSelectionGesture in
-            self?.triggerIfSelectionChanged(selectionGesture: isSelectionGesture)
+        startMouseEventListener { [weak self] in
+            self?.handleSelectionOrDeselection()
         }
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
@@ -185,34 +171,27 @@ class SelectionObserver {
         return nil
     }
 
-    // selectionGesture: true for drag, double, or triple click; false for normal click
-    func triggerIfSelectionChanged(selectionGesture: Bool) {
+    func handleSelectionOrDeselection() {
+        // Always called after mouse up.
         let selection = SelectionObserver.currentSelection()
         let selectedText = selection?["text"] as? String ?? ""
+        // When mouse drag or double/triple click selects something, the selectedText will change
 
-        if selectionGesture {
-            // Send selection if text is selected and changed
-            if !selectedText.isEmpty, selectedText != lastSelectionText {
-                lastSelectionText = selectedText
-                if let position = selection?["position"] as? [String: Any],
-                   let x = position["x"] as? CGFloat,
-                   let y = position["y"] as? CGFloat {
-                    lastPopupPosition = CGPoint(x: x, y: y)
-                }
-                popupShown = true
-                sendSignalIfChanged(selection!)
+        if !selectedText.isEmpty, selectedText != lastSelectionText {
+            // Selection just happened (by drag, double/triple click)
+            lastSelectionText = selectedText
+            if let position = selection?["position"] as? [String: Any],
+               let x = position["x"] as? CGFloat,
+               let y = position["y"] as? CGFloat {
+                lastPopupPosition = CGPoint(x: x, y: y)
             }
-            // If after a gesture, selection is empty, clear any shown popup
-            else if selectedText.isEmpty, popupShown {
-                sendResetSignal()
-            }
-        } else {
-            // On plain click, if selection is cleared, send reset
-            if selectedText.isEmpty, popupShown {
-                sendResetSignal()
-            }
-            // If selection remains and this was just a click, do nothing (don't send selected text)
+            popupShown = true
+            sendSignalIfChanged(selection!)
+        } else if selectedText.isEmpty, popupShown {
+            // Selection cleared (by click-away, or after drag)
+            sendResetSignal()
         }
+        // Else: nothing to do (no selection, and nothing was shown)
     }
 
     func listenForProcessedText() {
