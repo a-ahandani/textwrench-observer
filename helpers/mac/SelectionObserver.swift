@@ -64,7 +64,7 @@ private func globalMouseEventCallback(
         mouseUpSelectionCheckTimer?.invalidate()
         let clickCount = Int(event.getIntegerValueField(.mouseEventClickState))
         let wasDrag = mouseIsDragging
-        mouseUpSelectionCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.10, repeats: false) { _ in
+        mouseUpSelectionCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { _ in
             selectionChangedHandler?(wasDrag, clickCount)
         }
         mouseIsDragging = false
@@ -113,41 +113,6 @@ func startMouseEventListener(selectionChanged: @escaping (Bool, Int) -> Void) {
     }
 }
 
-// --- Clipboard Helper for Google Docs, Robust Version ---
-func getSelectedTextViaClipboardSync(timeout: TimeInterval = 1.0) -> String {
-    let pasteboard = NSPasteboard.general
-    let prevClipboard = pasteboard.string(forType: .string)
-    let src = CGEventSource(stateID: .hidSystemState)
-    let keyCDown = CGEvent(keyboardEventSource: src, virtualKey: 8, keyDown: true) // 8 = C
-    keyCDown?.flags = .maskCommand
-    let keyCUp = CGEvent(keyboardEventSource: src, virtualKey: 8, keyDown: false)
-    keyCUp?.flags = .maskCommand
-    let loc = CGEventTapLocation.cghidEventTap
-    keyCDown?.post(tap: loc)
-    keyCUp?.post(tap: loc)
-
-    // Poll the clipboard up to N times
-    let maxPolls = 12
-    let pollDelay: useconds_t = 70_000 // 70 ms
-    var result: String = ""
-    for _ in 0..<maxPolls {
-        usleep(pollDelay)
-        let nowClip = pasteboard.string(forType: .string) ?? ""
-        if !nowClip.isEmpty, nowClip != (prevClipboard ?? "") {
-            result = nowClip
-            break
-        }
-    }
-    // Optionally restore clipboard after a short time
-    if let prev = prevClipboard {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
-            pasteboard.clearContents()
-            pasteboard.setString(prev, forType: .string)
-        }
-    }
-    return result
-}
-
 class SelectionObserver {
     private var timer: Timer?
 
@@ -175,50 +140,34 @@ class SelectionObserver {
         let pid = frontApp.processIdentifier
         let appElement = AXUIElementCreateApplication(pid)
 
-        // Try AXSelectedText on focused UI element
         var focusedElementRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedElementRef) == .success,
-           let focusedElement = focusedElementRef {
+            let focusedElement = focusedElementRef {
             let element = focusedElement as! AXUIElement
             var selectedTextRef: CFTypeRef?
             if AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
-               let selectedText = selectedTextRef as? String {
+                let selectedText = selectedTextRef as? String {
                 let mousePos = currentMouseTopLeftPosition()
-                if !selectedText.isEmpty {
-                    return [
-                        "text": selectedText,
-                        "position": ["x": mousePos.x, "y": mousePos.y]
-                    ]
-                }
+                return [
+                    "text": selectedText,
+                    "position": ["x": mousePos.x, "y": mousePos.y]
+                ]
             }
         }
 
-        // Try AXSelectedText on window element as fallback
         var windowRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &windowRef) == .success,
-           let window = windowRef {
+            let window = windowRef {
             let windowElement = window as! AXUIElement
             var selectedTextRef: CFTypeRef?
             if AXUIElementCopyAttributeValue(windowElement, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
-               let selectedText = selectedTextRef as? String {
+                let selectedText = selectedTextRef as? String {
                 let mousePos = currentMouseTopLeftPosition()
-                if !selectedText.isEmpty {
-                    return [
-                        "text": selectedText,
-                        "position": ["x": mousePos.x, "y": mousePos.y]
-                    ]
-                }
+                return [
+                    "text": selectedText,
+                    "position": ["x": mousePos.x, "y": mousePos.y]
+                ]
             }
-        }
-
-        // If we got here, AXSelectedText didn't work (e.g., Google Docs) – try clipboard copy
-        let mousePos = currentMouseTopLeftPosition()
-        let clipboardSelected = getSelectedTextViaClipboardSync()
-        if !clipboardSelected.isEmpty {
-            return [
-                "text": clipboardSelected,
-                "position": ["x": mousePos.x, "y": mousePos.y]
-            ]
         }
         return nil
     }
