@@ -178,12 +178,22 @@ class SelectionObserver {
         let originalContent = pasteboard.string(forType: .string)
         let originalChangeCount = pasteboard.changeCount
         
+        // Ensure we have a clean state for the operation
+        defer {
+            // Always restore original clipboard content, even if we fail
+            pasteboard.clearContents()
+            if let originalContent = originalContent {
+                pasteboard.setString(originalContent, forType: .string)
+            }
+        }
+        
         // Clear clipboard and wait for it to be cleared
         pasteboard.clearContents()
         
         // Try to ensure focus is on the current app/window
-        let currentApp = NSWorkspace.shared.frontmostApplication
-        currentApp?.activate(options: [])
+        if let currentApp = NSWorkspace.shared.frontmostApplication {
+            currentApp.activate(options: [])
+        }
         
         // Small delay to ensure focus
         usleep(50000) // 50ms
@@ -194,34 +204,32 @@ class SelectionObserver {
         
         // Try sending the copy command
         for attempt in 1...3 {
-            let keyCDown = CGEvent(keyboardEventSource: src, virtualKey: 8, keyDown: true)
-            keyCDown?.flags = .maskCommand
-            let keyCUp = CGEvent(keyboardEventSource: src, virtualKey: 8, keyDown: false)
-            keyCUp?.flags = .maskCommand
+            NSLog("Clipboard method attempt \(attempt)")
             
-            keyCDown?.post(tap: loc)
-            usleep(20000) // 20ms between key down and up
-            keyCUp?.post(tap: loc)
-            
-            // Wait for clipboard to change (with timeout)
-            let startTime = CFAbsoluteTimeGetCurrent()
-            let timeout: CFTimeInterval = 0.3 // 300ms timeout per attempt
-            
-            while CFAbsoluteTimeGetCurrent() - startTime < timeout {
-                if pasteboard.changeCount > originalChangeCount {
-                    if let copiedText = pasteboard.string(forType: .string) {
-                        NSLog("Clipboard method got text on attempt \(attempt): '\(copiedText.prefix(50))...'")
-                        
-                        // Restore original clipboard content
-                        pasteboard.clearContents()
-                        if let originalContent = originalContent {
-                            pasteboard.setString(originalContent, forType: .string)
+            // Create and send the copy command
+            if let keyCDown = CGEvent(keyboardEventSource: src, virtualKey: 8, keyDown: true),
+               let keyCUp = CGEvent(keyboardEventSource: src, virtualKey: 8, keyDown: false) {
+                
+                keyCDown.flags = .maskCommand
+                keyCUp.flags = .maskCommand
+                
+                keyCDown.post(tap: loc)
+                usleep(20000) // 20ms between key down and up
+                keyCUp.post(tap: loc)
+                
+                // Wait for clipboard to change (with timeout)
+                let startTime = CFAbsoluteTimeGetCurrent()
+                let timeout: CFTimeInterval = 0.3 // 300ms timeout per attempt
+                
+                while CFAbsoluteTimeGetCurrent() - startTime < timeout {
+                    if pasteboard.changeCount > originalChangeCount {
+                        if let copiedText = pasteboard.string(forType: .string) {
+                            NSLog("Clipboard method got text on attempt \(attempt): '\(copiedText.prefix(50))...'")
+                            return copiedText
                         }
-                        
-                        return copiedText
                     }
+                    usleep(10000) // 10ms
                 }
-                usleep(10000) // 10ms
             }
             
             NSLog("Clipboard method attempt \(attempt) failed")
@@ -233,13 +241,6 @@ class SelectionObserver {
         }
         
         NSLog("Clipboard method failed after all attempts")
-        
-        // Restore original clipboard content
-        pasteboard.clearContents()
-        if let originalContent = originalContent {
-            pasteboard.setString(originalContent, forType: .string)
-        }
-        
         return nil
     }
 
@@ -247,6 +248,9 @@ class SelectionObserver {
     /// Never send on single click, even if there is a selection.
     /// Always send deselect on clear, or on window focus change.
     func handleSelectionOrDeselection(wasDrag: Bool, clickCount: Int) {
+        // This method is called for each selection attempt and should work independently
+        // even if previous attempts failed
+        
         let selection = SelectionObserver.currentSelection()
         var selectedText = selection?["text"] as? String ?? ""
         
@@ -263,8 +267,18 @@ class SelectionObserver {
         // Special fix: if selection is effectively empty but we have a selection gesture, try clipboard method
         if isEffectivelyEmpty && (wasDrag || clickCount == 2 || clickCount == 3) {
             NSLog("Trying clipboard method due to empty/whitespace accessibility result")
-            if let clipboardText = SelectionObserver.getSelectedTextViaClipboard(), !clipboardText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                selectedText = clipboardText
+            
+            // Try clipboard method - this will return nil if it fails, but won't break future attempts
+            if let clipboardText = SelectionObserver.getSelectedTextViaClipboard() {
+                let trimmedClipboardText = clipboardText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmedClipboardText.isEmpty {
+                    selectedText = clipboardText
+                    NSLog("Clipboard method succeeded, got: '\(selectedText.prefix(50))...'")
+                } else {
+                    NSLog("Clipboard method returned empty/whitespace text")
+                }
+            } else {
+                NSLog("Clipboard method returned nil - will try again on next selection")
             }
         }
 
@@ -289,6 +303,7 @@ class SelectionObserver {
             sendResetSignal()
         }
         // Else: nothing to do (no selection, and nothing was shown, or not a selection gesture)
+        // The system is ready for the next selection attempt regardless of whether this one succeeded
     }
 
     func listenForProcessedText() {
