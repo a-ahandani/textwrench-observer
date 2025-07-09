@@ -51,8 +51,6 @@ private func globalMouseEventCallback(
     event: CGEvent,
     refcon: UnsafeMutableRawPointer?
 ) -> Unmanaged<CGEvent>? {
-    let pos = event.location
-
     switch type {
     case .leftMouseDown, .rightMouseDown:
         mouseIsDragging = false
@@ -71,6 +69,7 @@ private func globalMouseEventCallback(
 
     case .mouseMoved:
         if popupShown, let popupPos = lastPopupPosition {
+            let pos = event.location
             let dx = abs(pos.x - popupPos.x)
             let dy = abs(pos.y - popupPos.y)
             if dx > 300 || dy > 300 {
@@ -113,6 +112,39 @@ func startMouseEventListener(selectionChanged: @escaping (Bool, Int) -> Void) {
     }
 }
 
+/// Recursively search AXValue/AXDescription/AXTitle in the accessibility tree
+func getSelectedTextFromAccessibilityTree(_ element: AXUIElement, depth: Int = 0) -> String? {
+    // AXValue
+    var value: CFTypeRef?
+    if AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success,
+       let valueStr = value as? String, !valueStr.isEmpty {
+        return valueStr
+    }
+    // AXDescription
+    var desc: CFTypeRef?
+    if AXUIElementCopyAttributeValue(element, kAXDescriptionAttribute as CFString, &desc) == .success,
+       let descStr = desc as? String, !descStr.isEmpty {
+        return descStr
+    }
+    // AXTitle
+    var title: CFTypeRef?
+    if AXUIElementCopyAttributeValue(element, kAXTitleAttribute as CFString, &title) == .success,
+       let titleStr = title as? String, !titleStr.isEmpty {
+        return titleStr
+    }
+    // Children
+    var children: CFTypeRef?
+    if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success,
+       let arr = children as? [AXUIElement], depth < 6 {
+        for child in arr {
+            if let found = getSelectedTextFromAccessibilityTree(child, depth: depth + 1) {
+                return found
+            }
+        }
+    }
+    return nil
+}
+
 class SelectionObserver {
     private var timer: Timer?
 
@@ -140,31 +172,47 @@ class SelectionObserver {
         let pid = frontApp.processIdentifier
         let appElement = AXUIElementCreateApplication(pid)
 
+        // AXSelectedText on focused UI element
         var focusedElementRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedElementRef) == .success,
-            let focusedElement = focusedElementRef {
-            let element = focusedElement as! AXUIElement
+        if AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedElementRef) == .success {
+            let element = focusedElementRef as! AXUIElement
             var selectedTextRef: CFTypeRef?
             if AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
-                let selectedText = selectedTextRef as? String {
+               let selectedText = selectedTextRef as? String, !selectedText.isEmpty {
                 let mousePos = currentMouseTopLeftPosition()
                 return [
                     "text": selectedText,
                     "position": ["x": mousePos.x, "y": mousePos.y]
                 ]
             }
+            // Try recursively
+            if let found = getSelectedTextFromAccessibilityTree(element), !found.isEmpty {
+                let mousePos = currentMouseTopLeftPosition()
+                return [
+                    "text": found,
+                    "position": ["x": mousePos.x, "y": mousePos.y]
+                ]
+            }
         }
 
+        // AXSelectedText on window element as fallback
         var windowRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &windowRef) == .success,
-            let window = windowRef {
-            let windowElement = window as! AXUIElement
+        if AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &windowRef) == .success {
+            let windowElement = windowRef as! AXUIElement
             var selectedTextRef: CFTypeRef?
             if AXUIElementCopyAttributeValue(windowElement, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
-                let selectedText = selectedTextRef as? String {
+               let selectedText = selectedTextRef as? String, !selectedText.isEmpty {
                 let mousePos = currentMouseTopLeftPosition()
                 return [
                     "text": selectedText,
+                    "position": ["x": mousePos.x, "y": mousePos.y]
+                ]
+            }
+            // Try recursively
+            if let found = getSelectedTextFromAccessibilityTree(windowElement), !found.isEmpty {
+                let mousePos = currentMouseTopLeftPosition()
+                return [
+                    "text": found,
                     "position": ["x": mousePos.x, "y": mousePos.y]
                 ]
             }
@@ -179,7 +227,6 @@ class SelectionObserver {
         let selection = SelectionObserver.currentSelection()
         let selectedText = selection?["text"] as? String ?? ""
 
-        // Only send selection if actual drag, or double/triple click
         if (wasDrag || clickCount == 2 || clickCount == 3), !selectedText.isEmpty, selectedText != lastSelectionText {
             lastSelectionText = selectedText
             if let position = selection?["position"] as? [String: Any],
@@ -190,11 +237,10 @@ class SelectionObserver {
             popupShown = true
             sendSignalIfChanged(selection!)
         }
-        // Send deselect if selection is cleared and popup was up
         else if selectedText.isEmpty, popupShown {
             sendResetSignal()
         }
-        // Else: nothing to do (no selection, and nothing was shown, or not a selection gesture)
+        // Else: nothing to do
     }
 
     func listenForProcessedText() {
