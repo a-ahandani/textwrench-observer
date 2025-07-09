@@ -9,6 +9,7 @@ var lastSelectionText: String = ""
 var lastSentSignal: String?
 var selectionChangedHandler: (() -> Void)?
 var mouseUpSelectionCheckTimer: Timer?
+var mouseIsDragging = false
 
 func currentMouseTopLeftPosition() -> (x: CGFloat, y: CGFloat) {
     let mouseLocation = NSEvent.mouseLocation
@@ -44,7 +45,7 @@ func sendResetSignal() {
     lastSelectionText = ""
 }
 
-// --- Mouse event handling (unchanged) ---
+// --- Mouse event handling (only fires on actual drags) ---
 private func globalMouseEventCallback(
     proxy: CGEventTapProxy,
     type: CGEventType,
@@ -53,15 +54,24 @@ private func globalMouseEventCallback(
 ) -> Unmanaged<CGEvent>? {
     let pos = event.location
 
-    if type == .leftMouseUp || type == .rightMouseUp {
-        // Delay the selection check to let macOS update selection state
-        mouseUpSelectionCheckTimer?.invalidate()
-        mouseUpSelectionCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: false) { _ in
-            selectionChangedHandler?()
-        }
-    }
+    switch type {
+    case .leftMouseDown, .rightMouseDown:
+        mouseIsDragging = false
 
-    if type == .mouseMoved || type == .leftMouseDragged || type == .rightMouseDragged {
+    case .leftMouseDragged, .rightMouseDragged:
+        mouseIsDragging = true
+
+    case .leftMouseUp, .rightMouseUp:
+        mouseUpSelectionCheckTimer?.invalidate()
+        // Only fire if it was a drag (actual selection gesture)
+        if mouseIsDragging {
+            mouseUpSelectionCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { _ in
+                selectionChangedHandler?()
+            }
+        }
+        mouseIsDragging = false // reset after mouse up
+
+    case .mouseMoved:
         if popupShown, let popupPos = lastPopupPosition {
             let dx = abs(pos.x - popupPos.x)
             let dy = abs(pos.y - popupPos.y)
@@ -69,8 +79,9 @@ private func globalMouseEventCallback(
                 sendResetSignal()
             }
         }
+    default:
+        break
     }
-
     return Unmanaged.passRetained(event)
 }
 
@@ -116,8 +127,6 @@ class SelectionObserver {
         listenForProcessedText()
     }
 
-    // No window focus or AXSelectedTextChangedNotification observers!
-    // Only this static method is used for mouse-based checking
     static func currentSelection() -> [String: Any]? {
         guard let frontApp = NSWorkspace.shared.frontmostApplication else { return nil }
         let pid = frontApp.processIdentifier
@@ -148,15 +157,14 @@ class SelectionObserver {
         if AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedElementRef) == .success,
             let focusedElement = focusedElementRef {
             let element = focusedElement as! AXUIElement
-            let isEditable = isElementEditable(element)
+            let _ = isElementEditable(element)
             var selectedTextRef: CFTypeRef?
             if AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
                 let selectedText = selectedTextRef as? String {
                 let mousePos = currentMouseTopLeftPosition()
                 return [
                     "text": selectedText,
-                    "position": ["x": mousePos.x, "y": mousePos.y],
-                    "editable": isEditable
+                    "position": ["x": mousePos.x, "y": mousePos.y]
                 ]
             }
         }
@@ -171,25 +179,23 @@ class SelectionObserver {
                 let mousePos = currentMouseTopLeftPosition()
                 return [
                     "text": selectedText,
-                    "position": ["x": mousePos.x, "y": mousePos.y],
-                    "editable": false
+                    "position": ["x": mousePos.x, "y": mousePos.y]
                 ]
             }
         }
         return nil
     }
 
-    // Only called after mouse up!
+    // Only called after mouse up following a drag!
     func triggerIfSelectionChanged() {
         if let selection = SelectionObserver.currentSelection(),
-            let selectedText = selection["text"] as? String {
-            // let editable = (selection["editable"] as? Bool) ?? false   // <-- REMOVE THIS LINE
+           let selectedText = selection["text"] as? String {
             if !selectedText.isEmpty {
                 if selectedText != lastSelectionText {
                     lastSelectionText = selectedText
                     if let position = selection["position"] as? [String: Any],
-                        let x = position["x"] as? CGFloat,
-                        let y = position["y"] as? CGFloat {
+                       let x = position["x"] as? CGFloat,
+                       let y = position["y"] as? CGFloat {
                         lastPopupPosition = CGPoint(x: x, y: y)
                     }
                     popupShown = true
@@ -206,7 +212,6 @@ class SelectionObserver {
             }
         }
     }
-
 
     func listenForProcessedText() {
         DispatchQueue.global().async {
