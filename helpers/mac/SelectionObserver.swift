@@ -7,7 +7,7 @@ var lastPopupPosition: CGPoint? = nil
 var popupShown: Bool = false
 var lastSelectionText: String = ""
 var lastSentSignal: String?
-var selectionChangedHandler: (() -> Void)?
+var selectionChangedHandler: ((Bool, Int) -> Void)?
 var mouseUpSelectionCheckTimer: Timer?
 var mouseIsDragging = false
 
@@ -62,11 +62,12 @@ private func globalMouseEventCallback(
 
     case .leftMouseUp, .rightMouseUp:
         mouseUpSelectionCheckTimer?.invalidate()
+        let clickCount = Int(event.getIntegerValueField(.mouseEventClickState))
+        let wasDrag = mouseIsDragging
         mouseUpSelectionCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { _ in
-            selectionChangedHandler?()
+            selectionChangedHandler?(wasDrag, clickCount)
         }
         mouseIsDragging = false
-
 
     case .mouseMoved:
         if popupShown, let popupPos = lastPopupPosition {
@@ -82,7 +83,7 @@ private func globalMouseEventCallback(
     return Unmanaged.passRetained(event)
 }
 
-func startMouseEventListener(selectionChanged: @escaping () -> Void) {
+func startMouseEventListener(selectionChanged: @escaping (Bool, Int) -> Void) {
     selectionChangedHandler = selectionChanged
 
     let mouseEventMask =
@@ -116,8 +117,8 @@ class SelectionObserver {
     private var timer: Timer?
 
     init() {
-        startMouseEventListener { [weak self] in
-            self?.handleSelectionOrDeselection()
+        startMouseEventListener { [weak self] wasDrag, clickCount in
+            self?.handleSelectionOrDeselection(wasDrag: wasDrag, clickCount: clickCount)
         }
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
@@ -171,14 +172,15 @@ class SelectionObserver {
         return nil
     }
 
-    func handleSelectionOrDeselection() {
-        // Always called after mouse up.
+    /// Only send selection if drag, or double/triple click (clickCount 2 or 3)
+    /// Never send on single click, even if there is a selection.
+    /// Always send deselect on clear, or on window focus change.
+    func handleSelectionOrDeselection(wasDrag: Bool, clickCount: Int) {
         let selection = SelectionObserver.currentSelection()
         let selectedText = selection?["text"] as? String ?? ""
-        // When mouse drag or double/triple click selects something, the selectedText will change
 
-        if !selectedText.isEmpty, selectedText != lastSelectionText {
-            // Selection just happened (by drag, double/triple click)
+        // Only send selection if actual drag, or double/triple click
+        if (wasDrag || clickCount == 2 || clickCount == 3), !selectedText.isEmpty, selectedText != lastSelectionText {
             lastSelectionText = selectedText
             if let position = selection?["position"] as? [String: Any],
                let x = position["x"] as? CGFloat,
@@ -187,11 +189,12 @@ class SelectionObserver {
             }
             popupShown = true
             sendSignalIfChanged(selection!)
-        } else if selectedText.isEmpty, popupShown {
-            // Selection cleared (by click-away, or after drag)
+        }
+        // Send deselect if selection is cleared and popup was up
+        else if selectedText.isEmpty, popupShown {
             sendResetSignal()
         }
-        // Else: nothing to do (no selection, and nothing was shown)
+        // Else: nothing to do (no selection, and nothing was shown, or not a selection gesture)
     }
 
     func listenForProcessedText() {
