@@ -55,15 +55,47 @@ function startHelper() {
 
 // Called to send text to paste
 function paste(processedText) {
-  if (helper) {
-    helper.stdin.write(processedText + '\n');
+  if (!helper) {
+    startHelper();
   }
+
+  // Handle both string and object input
+  let dataToSend;
+  if (typeof processedText === 'object' && processedText !== null) {
+    // If it's an object, stringify it
+    dataToSend = JSON.stringify(processedText);
+  } else {
+    // If it's a string, use it directly (backward compatibility)
+    dataToSend = String(processedText);
+  }
+
+  helper.stdin.write(dataToSend + '\n');
 }
 
 // Listen for selections
 function onSelection(callback) {
   startHelper();
-  listeners.push(callback);
+  
+  // Wrap the callback to allow for disposable listeners
+  const wrappedCallback = (result) => {
+    const shouldRemove = callback(result);
+    if (shouldRemove === true) {
+      const index = listeners.indexOf(wrappedCallback);
+      if (index !== -1) {
+        listeners.splice(index, 1);
+      }
+    }
+  };
+  
+  listeners.push(wrappedCallback);
+  return {
+    dispose: () => {
+      const index = listeners.indexOf(wrappedCallback);
+      if (index !== -1) {
+        listeners.splice(index, 1);
+      }
+    }
+  };
 }
 
 module.exports = { onSelection, paste };
