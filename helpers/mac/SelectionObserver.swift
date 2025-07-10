@@ -11,6 +11,7 @@ var lastSentSignal: String?
 var selectionChangedHandler: ((Bool, Int) -> Void)?
 var mouseUpSelectionCheckTimer: Timer?
 var mouseIsDragging = false
+var lastWindowInfo: [String: Any]? = nil
 
 // MARK: - Helper Functions
 func currentMouseTopLeftPosition() -> (x: CGFloat, y: CGFloat) {
@@ -45,6 +46,7 @@ func sendResetSignal() {
     popupShown = false
     lastPopupPosition = nil
     lastSelectionText = ""
+    lastWindowInfo = nil
 }
 
 // MARK: - Mouse Event Handling
@@ -131,6 +133,11 @@ class SelectionObserver {
         let pid = frontApp.processIdentifier
         let appElement = AXUIElementCreateApplication(pid)
         var isEditable = false
+        var windowInfo: [String: Any] = [
+            "appName": frontApp.localizedName ?? "unknown",
+            "appPID": pid,
+            "windowTitle": ""
+        ]
 
         // First try focused element
         var focusedElementRef: CFTypeRef?
@@ -138,13 +145,23 @@ class SelectionObserver {
            let focusedElement = focusedElementRef {
             let element = focusedElement as! AXUIElement
             
-            // Method 1: Check AXEditable attribute
+            // Get window title if available
+            var windowRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, kAXWindowAttribute as CFString, &windowRef) == .success,
+               let window = windowRef {
+                var titleRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(window as! AXUIElement, kAXTitleAttribute as CFString, &titleRef) == .success,
+                   let title = titleRef as? String {
+                    windowInfo["windowTitle"] = title
+                }
+            }
+            
+            // Check editable status
             var editableRef: CFTypeRef?
             if AXUIElementCopyAttributeValue(element, "AXEditable" as CFString, &editableRef) == .success {
                 isEditable = editableRef as? Bool ?? false
             }
             
-            // Method 2: Check role (for text fields)
             if !isEditable {
                 var roleRef: CFTypeRef?
                 if AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef) == .success,
@@ -153,7 +170,6 @@ class SelectionObserver {
                 }
             }
             
-            // Method 3: Check if we can perform editing actions
             if !isEditable {
                 var actionsRef: CFTypeRef?
                 if AXUIElementCopyAttributeValue(element, "AXActions" as CFString, &actionsRef) == .success,
@@ -171,7 +187,8 @@ class SelectionObserver {
                 return [
                     "text": selectedText,
                     "position": ["x": mousePos.x, "y": mousePos.y],
-                    "isEditable": isEditable
+                    "isEditable": isEditable,
+                    "window": windowInfo
                 ]
             }
         }
@@ -182,7 +199,14 @@ class SelectionObserver {
            let window = windowRef {
             let windowElement = window as! AXUIElement
             
-            // Repeat the same checks for window element
+            // Get window title
+            var titleRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(windowElement, kAXTitleAttribute as CFString, &titleRef) == .success,
+               let title = titleRef as? String {
+                windowInfo["windowTitle"] = title
+            }
+            
+            // Check editable status
             var editableRef: CFTypeRef?
             if AXUIElementCopyAttributeValue(windowElement, "AXEditable" as CFString, &editableRef) == .success {
                 isEditable = editableRef as? Bool ?? false
@@ -212,7 +236,8 @@ class SelectionObserver {
                 return [
                     "text": selectedText,
                     "position": ["x": mousePos.x, "y": mousePos.y],
-                    "isEditable": isEditable
+                    "isEditable": isEditable,
+                    "window": windowInfo
                 ]
             }
         }
@@ -302,6 +327,8 @@ class SelectionObserver {
         
         let selectedText = selection["text"] as? String ?? ""
         let isEditable = selection["isEditable"] as? Bool ?? false
+        let windowInfo = selection["window"] as? [String: Any]
+        lastWindowInfo = windowInfo
         
         // Define cases where we should try clipboard
         let shouldTryClipboard: Bool
@@ -330,7 +357,8 @@ class SelectionObserver {
                     let selectionData: [String: Any] = [
                         "text": clipboardText,
                         "position": ["x": mousePos.x, "y": mousePos.y],
-                        "isEditable": isEditable
+                        "isEditable": isEditable,
+                        "window": windowInfo ?? [:]
                     ]
                     sendSignalIfChanged(selectionData)
                 }
@@ -349,7 +377,8 @@ class SelectionObserver {
             let selectionData: [String: Any] = [
                 "text": selectedText,
                 "position": ["x": mousePos.x, "y": mousePos.y],
-                "isEditable": isEditable
+                "isEditable": isEditable,
+                "window": windowInfo ?? [:]
             ]
             sendSignalIfChanged(selectionData)
         }
@@ -404,39 +433,51 @@ class SelectionObserver {
         NSPasteboard.general.setString(text, forType: .string)
     }
 
-   func performPaste() {
-    // Hide the Electron toolbar immediately by sending reset signal
-    sendResetSignal()
-    
-    // Get the current frontmost application (should be the native app, not Electron)
-    guard let currentApp = NSWorkspace.shared.frontmostApplication else {
-        NSLog("Failed to get frontmost application")
-        return
+    func performPaste() {
+        // Hide the Electron toolbar immediately by sending reset signal
+        sendResetSignal()
+        
+        // Use the last window info if available
+        if let windowInfo = lastWindowInfo,
+           let appPID = windowInfo["appPID"] as? pid_t {
+            
+            // Get the application reference
+            let appRef = AXUIElementCreateApplication(appPID)
+            
+            // Try to activate the app
+            NSRunningApplication(processIdentifier: appPID)?.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            
+            // Small delay to allow window activation to complete
+            usleep(200000) // 200ms delay
+            
+            // Try to find the main window
+            var windowRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(appRef, kAXMainWindowAttribute as CFString, &windowRef) == .success,
+               let window = windowRef {
+                
+                // Bring the window to front
+                AXUIElementSetAttributeValue(window as! AXUIElement, kAXMainAttribute as CFString, kCFBooleanTrue)
+                
+                // Additional delay for window to come to front
+                usleep(100000) // 100ms delay
+            }
+        }
+        
+        // Create the paste command
+        let src = CGEventSource(stateID: .hidSystemState)
+        let loc = CGEventTapLocation.cghidEventTap
+        
+        // Send Command-V keypress
+        let keyVDown = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true)
+        keyVDown?.flags = .maskCommand
+        let keyVUp = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false)
+        keyVUp?.flags = .maskCommand
+        
+        // Post the events with small delays between them
+        keyVDown?.post(tap: loc)
+        usleep(50000) // 50ms delay between key down and up
+        keyVUp?.post(tap: loc)
     }
-    
-    // Activate the app with a small delay to ensure focus
-    currentApp.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-    
-    // Small delay to allow window activation to complete
-    usleep(150000) // Increased to 150ms for more reliable activation
-    
-    // Create the paste command
-    let src = CGEventSource(stateID: .hidSystemState)
-    let loc = CGEventTapLocation.cghidEventTap
-    
-    // Send Command-V keypress
-    let keyVDown = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true)
-    keyVDown?.flags = .maskCommand
-    let keyVUp = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false)
-    keyVUp?.flags = .maskCommand
-    
-    // Post the events with small delays between them
-    keyVDown?.post(tap: loc)
-    usleep(50000) // 50ms delay between key down and up
-    keyVUp?.post(tap: loc)
-    
-    NSLog("Paste performed in \(currentApp.localizedName ?? "unknown app")")
-}
 
     func run() {
         CFRunLoopRun()
