@@ -36,7 +36,6 @@ func sendSignalIfChanged(_ dict: [String: Any]) {
 }
 
 func sendResetSignal() {
-    // NSLog("Sending reset signal")
     let mousePos = currentMouseTopLeftPosition()
     let empty: [String: Any] = [
         "text": "",
@@ -59,21 +58,16 @@ private func globalMouseEventCallback(
 
     switch type {
     case .leftMouseDown, .rightMouseDown:
-        // NSLog("Mouse down event")
         mouseIsDragging = false
 
     case .leftMouseDragged, .rightMouseDragged:
-        // NSLog("Mouse drag event")
         mouseIsDragging = true
 
     case .leftMouseUp, .rightMouseUp:
-        // NSLog("Mouse up event")
         mouseUpSelectionCheckTimer?.invalidate()
         let clickCount = Int(event.getIntegerValueField(.mouseEventClickState))
         let wasDrag = mouseIsDragging
-        // NSLog("Setting timer for selection check (drag: \(wasDrag), clicks: \(clickCount))")
         mouseUpSelectionCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { _ in
-            // NSLog("Timer fired, calling selection handler")
             selectionChangedHandler?(wasDrag, clickCount)
         }
         mouseIsDragging = false
@@ -83,7 +77,6 @@ private func globalMouseEventCallback(
             let dx = abs(pos.x - popupPos.x)
             let dy = abs(pos.y - popupPos.y)
             if dx > 300 || dy > 300 {
-                // NSLog("Mouse moved far from popup, sending reset")
                 sendResetSignal()
             }
         }
@@ -101,7 +94,6 @@ class SelectionObserver {
     private var isProcessingClipboard = false
 
     init() {
-        // NSLog("Initializing SelectionObserver")
         setupMouseEventListener()
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
@@ -114,13 +106,11 @@ class SelectionObserver {
 
     private func setupMouseEventListener() {
         startMouseEventListener { [weak self] wasDrag, clickCount in
-            // NSLog("Selection handler called (drag: \(wasDrag), clicks: \(clickCount))")
             self?.handleSelectionOrDeselection(wasDrag: wasDrag, clickCount: clickCount)
         }
     }
 
     @objc func windowFocusChanged(_ notification: Notification? = nil) {
-        // NSLog("Window focus changed")
         if popupShown {
             sendResetSignal()
         }
@@ -129,39 +119,54 @@ class SelectionObserver {
 
     func ensureEventTapActive() {
         if let eventTap = eventTap, !CGEvent.tapIsEnabled(tap: eventTap) {
-            // NSLog("Re-enabling event tap")
             CGEvent.tapEnable(tap: eventTap, enable: true)
         }
     }
 
     static func currentSelection() -> [String: Any]? {
         guard let frontApp = NSWorkspace.shared.frontmostApplication else {
-            // NSLog("No frontmost application")
             return nil
         }
         
-        // NSLog("Checking selection for app: \(frontApp.localizedName ?? "unknown")")
         let pid = frontApp.processIdentifier
         let appElement = AXUIElementCreateApplication(pid)
         var isEditable = false
 
-        // First try to get focused element
+        // First try focused element
         var focusedElementRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedElementRef) == .success,
-            let focusedElement = focusedElementRef {
+           let focusedElement = focusedElementRef {
             let element = focusedElement as! AXUIElement
             
-            // Check if element is editable
+            // Method 1: Check AXEditable attribute
             var editableRef: CFTypeRef?
-            let editableAttribute = "AXEditable" as CFString
-            if AXUIElementCopyAttributeValue(element, editableAttribute, &editableRef) == .success {
+            if AXUIElementCopyAttributeValue(element, "AXEditable" as CFString, &editableRef) == .success {
                 isEditable = editableRef as? Bool ?? false
             }
             
-            // Get selected text if available
+            // Method 2: Check role (for text fields)
+            if !isEditable {
+                var roleRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef) == .success,
+                   let role = roleRef as? String {
+                    isEditable = ["AXTextField", "AXTextArea", "AXComboBox"].contains(role)
+                }
+            }
+            
+            // Method 3: Check if we can perform editing actions
+            if !isEditable {
+                var actionsRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(element, "AXActions" as CFString, &actionsRef) == .success,
+                   let actions = actionsRef as? [String] {
+                    isEditable = actions.contains("AXSetSelectedText") || 
+                                actions.contains("AXInsertText")
+                }
+            }
+
+            // Get selected text
             var selectedTextRef: CFTypeRef?
             if AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
-                let selectedText = selectedTextRef as? String {
+               let selectedText = selectedTextRef as? String {
                 let mousePos = currentMouseTopLeftPosition()
                 return [
                     "text": selectedText,
@@ -171,22 +176,38 @@ class SelectionObserver {
             }
         }
 
-        // Fallback to main window if focused element didn't work
+        // Fallback to main window
         var windowRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &windowRef) == .success,
-            let window = windowRef {
+           let window = windowRef {
             let windowElement = window as! AXUIElement
             
-            // Check if window is editable
+            // Repeat the same checks for window element
             var editableRef: CFTypeRef?
-            let editableAttribute = "AXEditable" as CFString
-            if AXUIElementCopyAttributeValue(windowElement, editableAttribute, &editableRef) == .success {
+            if AXUIElementCopyAttributeValue(windowElement, "AXEditable" as CFString, &editableRef) == .success {
                 isEditable = editableRef as? Bool ?? false
             }
             
+            if !isEditable {
+                var roleRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(windowElement, kAXRoleAttribute as CFString, &roleRef) == .success,
+                   let role = roleRef as? String {
+                    isEditable = ["AXTextField", "AXTextArea", "AXComboBox"].contains(role)
+                }
+            }
+            
+            if !isEditable {
+                var actionsRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(windowElement, "AXActions" as CFString, &actionsRef) == .success,
+                   let actions = actionsRef as? [String] {
+                    isEditable = actions.contains("AXSetSelectedText") || 
+                                actions.contains("AXInsertText")
+                }
+            }
+
             var selectedTextRef: CFTypeRef?
             if AXUIElementCopyAttributeValue(windowElement, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
-                let selectedText = selectedTextRef as? String {
+               let selectedText = selectedTextRef as? String {
                 let mousePos = currentMouseTopLeftPosition()
                 return [
                     "text": selectedText,
@@ -196,20 +217,16 @@ class SelectionObserver {
             }
         }
         
-        // NSLog("No selection found in focused element or main window")
         return nil
     }
 
     func getSelectedTextViaClipboard() -> String? {
         guard !isProcessingClipboard else {
-            // NSLog("Already processing clipboard, skipping")
             return nil
         }
         
         isProcessingClipboard = true
         defer { isProcessingClipboard = false }
-        
-        // NSLog("Starting clipboard method")
         
         // Temporarily disable event tap
         if let eventTap = eventTap {
@@ -217,7 +234,6 @@ class SelectionObserver {
         }
         
         defer {
-            // Re-enable event tap when done
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 self.ensureEventTapActive()
             }
@@ -238,7 +254,6 @@ class SelectionObserver {
         let loc = CGEventTapLocation.cghidEventTap
         
         for attempt in 1...3 {
-            // NSLog("Clipboard attempt \(attempt)")
             let keyCDown = CGEvent(keyboardEventSource: src, virtualKey: 8, keyDown: true)
             keyCDown?.flags = .maskCommand
             let keyCUp = CGEvent(keyboardEventSource: src, virtualKey: 8, keyDown: false)
@@ -254,27 +269,21 @@ class SelectionObserver {
             while CFAbsoluteTimeGetCurrent() - startTime < timeout {
                 if pasteboard.changeCount > originalChangeCount {
                     if let copiedText = pasteboard.string(forType: .string) {
-                        // NSLog("Clipboard success on attempt \(attempt): '\(copiedText)'")
-                        
                         pasteboard.clearContents()
                         if let originalContent = originalContent {
                             pasteboard.setString(originalContent, forType: .string)
                         }
-                        
                         return copiedText
                     }
                 }
                 usleep(10000)
             }
             
-            // NSLog("Clipboard attempt \(attempt) failed")
-            
             if attempt < 3 {
                 usleep(100000)
             }
         }
         
-        // NSLog("All clipboard attempts failed")
         pasteboard.clearContents()
         if let originalContent = originalContent {
             pasteboard.setString(originalContent, forType: .string)
@@ -294,34 +303,23 @@ class SelectionObserver {
         let selectedText = selection["text"] as? String ?? ""
         let isEditable = selection["isEditable"] as? Bool ?? false
         
-        // Define all cases where we should try clipboard
-        var currentCase = "None"
+        // Define cases where we should try clipboard
         let shouldTryClipboard: Bool
         
-        // First check for exact matches
         if selectedText.isEmpty {
-            currentCase = "Empty string"
             shouldTryClipboard = false
         } else if selectedText == " " {
-            currentCase = "Single space"
             shouldTryClipboard = true
-        } 
-        // Then check for other whitespace cases
-        else if selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            currentCase = "Whitespace string"
+        } else if selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             shouldTryClipboard = true
-        } 
-        // Default case
-        else {
-            currentCase = "Non-whitespace text"
+        } else {
             shouldTryClipboard = false
         }
         
         let finalShouldTry = shouldTryClipboard && (wasDrag || clickCount == 2 || clickCount == 3)
-        // NSLog("Selected text--->: '\(selectedText)' Current case: \(currentCase). Should try clipboard: \(finalShouldTry)")
+        // NSLog("Selected text: '\(selectedText)' isEditable: \(isEditable). Should try clipboard: \(finalShouldTry)")
 
         if finalShouldTry {
-            // NSLog("Trying clipboard method for case: \(currentCase)")
             if let clipboardText = getSelectedTextViaClipboard(), !clipboardText.isEmpty {
                 if !clipboardText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     let mousePos = currentMouseTopLeftPosition()
@@ -340,11 +338,9 @@ class SelectionObserver {
             }
         }
         
-        // For all other cases, use the original selection
         let hasMeaningfulText = !selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         
         if (wasDrag || clickCount == 2 || clickCount == 3), hasMeaningfulText, selectedText != lastSelectionText {
-            NSLog("Sending selection")
             lastSelectionText = selectedText
             let mousePos = currentMouseTopLeftPosition()
             lastPopupPosition = CGPoint(x: mousePos.x, y: mousePos.y)
@@ -358,7 +354,6 @@ class SelectionObserver {
             sendSignalIfChanged(selectionData)
         }
         else if !hasMeaningfulText, popupShown {
-            // NSLog("Sending reset due to empty or whitespace-only selection")
             sendResetSignal()
         }
     }
@@ -388,9 +383,7 @@ class SelectionObserver {
             runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
             CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
             CGEvent.tapEnable(tap: eventTap, enable: true)
-            // NSLog("Mouse event tap created successfully")
         } else {
-            // NSLog("Failed to create event tap for mouse events.")
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 self.setupMouseEventListener()
             }
@@ -400,7 +393,6 @@ class SelectionObserver {
     func listenForProcessedText() {
         DispatchQueue.global().async {
             while let processedText = readLine() {
-                // NSLog("Received processed text")
                 self.copyToClipboard(processedText)
                 self.performPaste()
             }
@@ -413,7 +405,6 @@ class SelectionObserver {
     }
 
     func performPaste() {
-        // NSLog("Performing paste")
         let src = CGEventSource(stateID: .hidSystemState)
         let keyVDown = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true)
         keyVDown?.flags = .maskCommand
@@ -425,7 +416,6 @@ class SelectionObserver {
     }
 
     func run() {
-        // NSLog("Starting observer run loop")
         CFRunLoopRun()
     }
 }
