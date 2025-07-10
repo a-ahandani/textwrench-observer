@@ -148,7 +148,7 @@ class SelectionObserver {
             if AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
                 let selectedText = selectedTextRef as? String {
                 let mousePos = currentMouseTopLeftPosition()
-                // NSLog("Got selection from focused element: '\(selectedText.prefix(50))...'")
+                // NSLog("Got selection from focused element: '\(selectedText)'")
                 return [
                     "text": selectedText,
                     "position": ["x": mousePos.x, "y": mousePos.y]
@@ -164,7 +164,7 @@ class SelectionObserver {
             if AXUIElementCopyAttributeValue(windowElement, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
                 let selectedText = selectedTextRef as? String {
                 let mousePos = currentMouseTopLeftPosition()
-                // NSLog("Got selection from main window: '\(selectedText.prefix(50))...'")
+                // NSLog("Got selection from main window: '\(selectedText)'")
                 return [
                     "text": selectedText,
                     "position": ["x": mousePos.x, "y": mousePos.y]
@@ -230,7 +230,7 @@ class SelectionObserver {
             while CFAbsoluteTimeGetCurrent() - startTime < timeout {
                 if pasteboard.changeCount > originalChangeCount {
                     if let copiedText = pasteboard.string(forType: .string) {
-                        // NSLog("Clipboard success on attempt \(attempt): '\(copiedText.prefix(50))...'")
+                        // NSLog("Clipboard success on attempt \(attempt): '\(copiedText)'")
                         
                         pasteboard.clearContents()
                         if let originalContent = originalContent {
@@ -259,53 +259,76 @@ class SelectionObserver {
         return nil
     }
 
-    func handleSelectionOrDeselection(wasDrag: Bool, clickCount: Int) {
-        // NSLog("Handling selection (drag: \(wasDrag), clicks: \(clickCount))")
-        
-        let selection = SelectionObserver.currentSelection()
-        var selectedText = selection?["text"] as? String ?? ""
-        
-        if !selectedText.isEmpty {
-            // NSLog("Accessibility API got text: '\(selectedText.prefix(50))...'")
-        } else {
-            // NSLog("Accessibility API got no text")
-        }
+func handleSelectionOrDeselection(wasDrag: Bool, clickCount: Int) {
+    let selection = SelectionObserver.currentSelection()
+    let selectedText = selection?["text"] as? String ?? ""
+    
+    // Define all cases where we should try clipboard
+    var currentCase = "None"
+    let shouldTryClipboard: Bool
+    
+    // First check for exact matches
+    if selectedText.isEmpty {
+        currentCase = "Empty string"
+        shouldTryClipboard = false
+    } else if selectedText == " " {
+        currentCase = "Single space"
+        shouldTryClipboard = true
+    } 
+    // Then check for other whitespace cases
+    else if selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        currentCase = "Whitespace string"
+        shouldTryClipboard = true
+    } 
+    // Default case
+    else {
+        currentCase = "Non-whitespace text"
+        shouldTryClipboard = false
+    }
+    
+    let finalShouldTry = shouldTryClipboard && (wasDrag || clickCount == 2 || clickCount == 3)
+    // NSLog("Selected text--->: '\(selectedText)' Current case: \(currentCase). Should try clipboard: \(finalShouldTry)")
 
-        let isEffectivelyEmpty = selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-
-        if isEffectivelyEmpty && (wasDrag || clickCount == 2 || clickCount == 3) {
-            // NSLog("Trying clipboard method")
-            if let clipboardText = getSelectedTextViaClipboard(), !clipboardText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                selectedText = clipboardText
-                // NSLog("Clipboard method succeeded")
-            } else {
-                // NSLog("Clipboard method failed, checking if we need to reset")
-                if popupShown {
-                    sendResetSignal()
-                }
-                return
+    if finalShouldTry {
+        // NSLog("Trying clipboard method for case: \(currentCase)")
+        if let clipboardText = getSelectedTextViaClipboard(), !clipboardText.isEmpty {
+            if !clipboardText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let mousePos = currentMouseTopLeftPosition()
+                lastSelectionText = clipboardText
+                lastPopupPosition = CGPoint(x: mousePos.x, y: mousePos.y)
+                popupShown = true
+                
+                let selectionData: [String: Any] = [
+                    "text": clipboardText,
+                    "position": ["x": mousePos.x, "y": mousePos.y]
+                ]
+                sendSignalIfChanged(selectionData)
             }
-        }
-
-        let hasMeaningfulText = !selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        if (wasDrag || clickCount == 2 || clickCount == 3), hasMeaningfulText, selectedText != lastSelectionText {
-            // NSLog("Sending selection")
-            lastSelectionText = selectedText
-            let mousePos = currentMouseTopLeftPosition()
-            lastPopupPosition = CGPoint(x: mousePos.x, y: mousePos.y)
-            popupShown = true
-            
-            let selectionData: [String: Any] = [
-                "text": selectedText,
-                "position": ["x": mousePos.x, "y": mousePos.y]
-            ]
-            sendSignalIfChanged(selectionData)
-        }
-        else if !hasMeaningfulText, popupShown {
-            // NSLog("Sending reset due to empty selection")
-            sendResetSignal()
+            return
         }
     }
+    
+    // For all other cases, use the original selection
+    let hasMeaningfulText = !selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    
+    if (wasDrag || clickCount == 2 || clickCount == 3), hasMeaningfulText, selectedText != lastSelectionText {
+        // NSLog("Sending selection")
+        lastSelectionText = selectedText
+        let mousePos = currentMouseTopLeftPosition()
+        lastPopupPosition = CGPoint(x: mousePos.x, y: mousePos.y)
+        popupShown = true
+        
+        let selectionData: [String: Any] = [
+            "text": selectedText,
+            "position": ["x": mousePos.x, "y": mousePos.y]
+        ]
+        sendSignalIfChanged(selectionData)
+    }
+    else if !hasMeaningfulText, popupShown {
+        // NSLog("Sending reset due to empty or whitespace-only selection")
+        sendResetSignal()
+    }
+}
 
     func startMouseEventListener(selectionChanged: @escaping (Bool, Int) -> Void) {
         selectionChangedHandler = selectionChanged
