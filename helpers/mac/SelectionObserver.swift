@@ -405,14 +405,34 @@ class SelectionObserver {
     }
 
     func performPaste() {
+        // Get the current frontmost application
+        guard let currentApp = NSWorkspace.shared.frontmostApplication else {
+            NSLog("Failed to get frontmost application")
+            return
+        }
+        
+        // Activate the app with a small delay to ensure focus
+        currentApp.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        
+        // Small delay to allow window activation to complete
+        usleep(100000) // 100ms delay
+        
+        // Create the paste command
         let src = CGEventSource(stateID: .hidSystemState)
+        let loc = CGEventTapLocation.cghidEventTap
+        
+        // Send Command-V keypress
         let keyVDown = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true)
         keyVDown?.flags = .maskCommand
         let keyVUp = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false)
         keyVUp?.flags = .maskCommand
-        let loc = CGEventTapLocation.cghidEventTap
+        
+        // Post the events with small delays between them
         keyVDown?.post(tap: loc)
+        usleep(30000) // 30ms delay between key down and up
         keyVUp?.post(tap: loc)
+        
+        NSLog("Paste performed in \(currentApp.localizedName ?? "unknown app")")
     }
 
     func run() {
