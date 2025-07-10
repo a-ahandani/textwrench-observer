@@ -421,9 +421,21 @@ class SelectionObserver {
 
     func listenForProcessedText() {
         DispatchQueue.global().async {
-            while let processedText = readLine() {
-                self.copyToClipboard(processedText)
-                self.performPaste()
+            while let line = readLine() {
+                // Parse the incoming JSON which may contain both text and appPID
+                if let data = line.data(using: .utf8),
+                   let json = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] {
+                    
+                    let text = json["text"] as? String ?? line
+                    let appPID = json["appPID"] as? pid_t
+                    
+                    self.copyToClipboard(text)
+                    self.performPaste(targetAppPID: appPID)
+                } else {
+                    // Fallback for plain text input
+                    self.copyToClipboard(line)
+                    self.performPaste(targetAppPID: nil)
+                }
             }
         }
     }
@@ -433,33 +445,45 @@ class SelectionObserver {
         NSPasteboard.general.setString(text, forType: .string)
     }
 
-    func performPaste() {
+    func performPaste(targetAppPID: pid_t?) {
         // Hide the Electron toolbar immediately by sending reset signal
         sendResetSignal()
         
-        // Use the last window info if available
-        if let windowInfo = lastWindowInfo,
-           let appPID = windowInfo["appPID"] as? pid_t {
-            
+        // Use the targetAppPID if provided, otherwise fall back to lastWindowInfo
+        let pidToUse = targetAppPID ?? (lastWindowInfo?["appPID"] as? pid_t)
+        
+        if let pid = pidToUse {
             // Get the application reference
-            let appRef = AXUIElementCreateApplication(appPID)
+            let appRef = AXUIElementCreateApplication(pid)
             
-            // Try to activate the app
-            NSRunningApplication(processIdentifier: appPID)?.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-            
-            // Small delay to allow window activation to complete
-            usleep(200000) // 200ms delay
-            
-            // Try to find the main window
-            var windowRef: CFTypeRef?
-            if AXUIElementCopyAttributeValue(appRef, kAXMainWindowAttribute as CFString, &windowRef) == .success,
-               let window = windowRef {
-                
-                // Bring the window to front
-                AXUIElementSetAttributeValue(window as! AXUIElement, kAXMainAttribute as CFString, kCFBooleanTrue)
-                
-                // Additional delay for window to come to front
-                usleep(100000) // 100ms delay
+            // Try to activate the app with multiple attempts
+            for attempt in 1...3 {
+                // Get the running application
+                if let app = NSRunningApplication(processIdentifier: pid) {
+                    // Activate with options that bring all windows forward
+                    let activated = app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+                    
+                    if activated {
+                        // Additional delay for activation to complete
+                        usleep(200000) // 200ms delay
+                        
+                        // Try to find and focus the main window
+                        var windowRef: CFTypeRef?
+                        if AXUIElementCopyAttributeValue(appRef, kAXMainWindowAttribute as CFString, &windowRef) == .success,
+                           let window = windowRef {
+                            
+                            // Bring the window to front
+                            AXUIElementSetAttributeValue(window as! AXUIElement, kAXMainAttribute as CFString, kCFBooleanTrue)
+                            
+                            // Additional delay for window to come to front
+                            usleep(100000) // 100ms delay
+                        }
+                        break
+                    } else if attempt == 3 {
+                        NSLog("Failed to activate app after 3 attempts")
+                    }
+                }
+                usleep(100000) // 100ms delay between attempts
             }
         }
         
@@ -467,16 +491,24 @@ class SelectionObserver {
         let src = CGEventSource(stateID: .hidSystemState)
         let loc = CGEventTapLocation.cghidEventTap
         
-        // Send Command-V keypress
-        let keyVDown = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true)
-        keyVDown?.flags = .maskCommand
-        let keyVUp = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false)
-        keyVUp?.flags = .maskCommand
-        
-        // Post the events with small delays between them
-        keyVDown?.post(tap: loc)
-        usleep(50000) // 50ms delay between key down and up
-        keyVUp?.post(tap: loc)
+        // Send Command-V keypress with retries
+        for attempt in 1...2 {
+            let keyVDown = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true)
+            keyVDown?.flags = .maskCommand
+            let keyVUp = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false)
+            keyVUp?.flags = .maskCommand
+            
+            keyVDown?.post(tap: loc)
+            usleep(50000) // 50ms delay between key down and up
+            keyVUp?.post(tap: loc)
+            
+            // Only retry if first attempt failed and we have a target PID
+            if attempt == 1 && pidToUse != nil {
+                usleep(100000) // 100ms delay before retry
+            } else {
+                break
+            }
+        }
     }
 
     func run() {
