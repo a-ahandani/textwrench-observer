@@ -446,81 +446,67 @@ class SelectionObserver {
     }
 
     func performPaste(targetAppPID: pid_t?) {
-        // Hide the Electron toolbar immediately by sending reset signal
-        sendResetSignal()
+        // Disable event tap during paste operation to prevent interference
+        if let eventTap = eventTap {
+            CGEvent.tapEnable(tap: eventTap, enable: false)
+        }
         
+        defer {
+            // Re-enable event tap after short delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.ensureEventTapActive()
+            }
+        }
+        
+        sendResetSignal()
         NSLog("=== Starting paste operation ===")
         
-        // Use the targetAppPID if provided, otherwise fall back to lastWindowInfo
         let pidToUse = targetAppPID ?? (lastWindowInfo?["appPID"] as? pid_t)
         
         if let pid = pidToUse {
-            NSLog("Attempting to focus app with PID: \(pid)")
+            NSLog("Targeting app with PID: \(pid)")
             
             // Get the application reference
             let appRef = AXUIElementCreateApplication(pid)
             
-            // Get the running application
+            // Activate the app
             if let app = NSRunningApplication(processIdentifier: pid) {
-                // Activate with options that bring all windows forward
                 let activated = app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-                NSLog("App activation \(activated ? "succeeded" : "failed")")
+                NSLog("App activation \(activated ? "successful" : "failed")")
                 
-                if activated {
-                    // Wait for activation to complete
-                    usleep(300000) // 300ms delay
-                    NSLog("Activation delay complete")
+                // Longer delay for app to become active
+                usleep(500000) // 500ms
+                
+                // Verify activation
+                if let frontmostApp = NSWorkspace.shared.frontmostApplication {
+                    let success = frontmostApp.processIdentifier == pid
+                    NSLog("Frontmost app: \(frontmostApp.localizedName ?? "unknown") (\(frontmostApp.processIdentifier)) - \(success ? "Correct" : "Incorrect")")
                     
-                    // Verify the app is actually frontmost
-                    if let frontmostApp = NSWorkspace.shared.frontmostApplication {
-                        let isCorrectApp = frontmostApp.processIdentifier == pid
-                        NSLog("Frontmost app check: \(isCorrectApp ? "correct" : "incorrect") (expected: \(pid), actual: \(frontmostApp.processIdentifier))")
-                        
-                        if isCorrectApp {
-                            // Try to find and focus the main window
-                            var windowRef: CFTypeRef?
-                            if AXUIElementCopyAttributeValue(appRef, kAXMainWindowAttribute as CFString, &windowRef) == .success,
-                            let window = windowRef {
-                                NSLog("Found main window, bringing to front")
-                                
-                                // Bring the window to front
-                                AXUIElementSetAttributeValue(window as! AXUIElement, kAXMainAttribute as CFString, kCFBooleanTrue)
-                                
-                                // Additional delay for window to come to front
-                                usleep(200000) // 200ms delay
-                                NSLog("Window focus delay complete")
-                            } else {
-                                NSLog("Failed to find main window")
-                            }
+                    if success {
+                        // Focus the main window
+                        var windowRef: CFTypeRef?
+                        if AXUIElementCopyAttributeValue(appRef, kAXMainWindowAttribute as CFString, &windowRef) == .success,
+                        let window = windowRef {
+                            AXUIElementSetAttributeValue(window as! AXUIElement, kAXMainAttribute as CFString, kCFBooleanTrue)
+                            usleep(300000) // 300ms for window focus
                         }
                     }
                 }
-            } else {
-                NSLog("Failed to get NSRunningApplication for PID: \(pid)")
             }
-        } else {
-            NSLog("No target PID provided, using current frontmost app")
         }
         
-        // Log current frontmost app for debugging
-        if let frontmost = NSWorkspace.shared.frontmostApplication {
-            NSLog("Current frontmost app: \(frontmost.localizedName ?? "unknown") (PID: \(frontmost.processIdentifier))")
-        }
-        
-        // Create the paste command
+        // Perform the paste
+        NSLog("Executing paste command")
         let src = CGEventSource(stateID: .hidSystemState)
         let loc = CGEventTapLocation.cghidEventTap
         
-        NSLog("Sending paste command")
-        
-        // Send Command-V keypress
         let keyVDown = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true)
         keyVDown?.flags = .maskCommand
         let keyVUp = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false)
         keyVUp?.flags = .maskCommand
         
         keyVDown?.post(tap: loc)
-        usleep(50000) // 50ms delay between key down and up
+        usleep(100000) // 100ms between key down/up
         keyVUp?.post(tap: loc)
         
         NSLog("=== Paste operation completed ===")
