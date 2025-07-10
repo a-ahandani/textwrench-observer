@@ -449,66 +449,81 @@ class SelectionObserver {
         // Hide the Electron toolbar immediately by sending reset signal
         sendResetSignal()
         
+        NSLog("=== Starting paste operation ===")
+        
         // Use the targetAppPID if provided, otherwise fall back to lastWindowInfo
         let pidToUse = targetAppPID ?? (lastWindowInfo?["appPID"] as? pid_t)
         
         if let pid = pidToUse {
+            NSLog("Attempting to focus app with PID: \(pid)")
+            
             // Get the application reference
             let appRef = AXUIElementCreateApplication(pid)
             
-            // Try to activate the app with multiple attempts
-            for attempt in 1...3 {
-                // Get the running application
-                if let app = NSRunningApplication(processIdentifier: pid) {
-                    // Activate with options that bring all windows forward
-                    let activated = app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            // Get the running application
+            if let app = NSRunningApplication(processIdentifier: pid) {
+                // Activate with options that bring all windows forward
+                let activated = app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+                NSLog("App activation \(activated ? "succeeded" : "failed")")
+                
+                if activated {
+                    // Wait for activation to complete
+                    usleep(300000) // 300ms delay
+                    NSLog("Activation delay complete")
                     
-                    if activated {
-                        // Additional delay for activation to complete
-                        usleep(200000) // 200ms delay
+                    // Verify the app is actually frontmost
+                    if let frontmostApp = NSWorkspace.shared.frontmostApplication {
+                        let isCorrectApp = frontmostApp.processIdentifier == pid
+                        NSLog("Frontmost app check: \(isCorrectApp ? "correct" : "incorrect") (expected: \(pid), actual: \(frontmostApp.processIdentifier))")
                         
-                        // Try to find and focus the main window
-                        var windowRef: CFTypeRef?
-                        if AXUIElementCopyAttributeValue(appRef, kAXMainWindowAttribute as CFString, &windowRef) == .success,
-                           let window = windowRef {
-                            
-                            // Bring the window to front
-                            AXUIElementSetAttributeValue(window as! AXUIElement, kAXMainAttribute as CFString, kCFBooleanTrue)
-                            
-                            // Additional delay for window to come to front
-                            usleep(100000) // 100ms delay
+                        if isCorrectApp {
+                            // Try to find and focus the main window
+                            var windowRef: CFTypeRef?
+                            if AXUIElementCopyAttributeValue(appRef, kAXMainWindowAttribute as CFString, &windowRef) == .success,
+                            let window = windowRef {
+                                NSLog("Found main window, bringing to front")
+                                
+                                // Bring the window to front
+                                AXUIElementSetAttributeValue(window as! AXUIElement, kAXMainAttribute as CFString, kCFBooleanTrue)
+                                
+                                // Additional delay for window to come to front
+                                usleep(200000) // 200ms delay
+                                NSLog("Window focus delay complete")
+                            } else {
+                                NSLog("Failed to find main window")
+                            }
                         }
-                        break
-                    } else if attempt == 3 {
-                        NSLog("Failed to activate app after 3 attempts")
                     }
                 }
-                usleep(100000) // 100ms delay between attempts
+            } else {
+                NSLog("Failed to get NSRunningApplication for PID: \(pid)")
             }
+        } else {
+            NSLog("No target PID provided, using current frontmost app")
+        }
+        
+        // Log current frontmost app for debugging
+        if let frontmost = NSWorkspace.shared.frontmostApplication {
+            NSLog("Current frontmost app: \(frontmost.localizedName ?? "unknown") (PID: \(frontmost.processIdentifier))")
         }
         
         // Create the paste command
         let src = CGEventSource(stateID: .hidSystemState)
         let loc = CGEventTapLocation.cghidEventTap
         
-        // Send Command-V keypress with retries
-        for attempt in 1...2 {
-            let keyVDown = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true)
-            keyVDown?.flags = .maskCommand
-            let keyVUp = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false)
-            keyVUp?.flags = .maskCommand
-            
-            keyVDown?.post(tap: loc)
-            usleep(50000) // 50ms delay between key down and up
-            keyVUp?.post(tap: loc)
-            
-            // Only retry if first attempt failed and we have a target PID
-            if attempt == 1 && pidToUse != nil {
-                usleep(100000) // 100ms delay before retry
-            } else {
-                break
-            }
-        }
+        NSLog("Sending paste command")
+        
+        // Send Command-V keypress
+        let keyVDown = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true)
+        keyVDown?.flags = .maskCommand
+        let keyVUp = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false)
+        keyVUp?.flags = .maskCommand
+        
+        keyVDown?.post(tap: loc)
+        usleep(50000) // 50ms delay between key down and up
+        keyVUp?.post(tap: loc)
+        
+        NSLog("=== Paste operation completed ===")
     }
 
     func run() {
