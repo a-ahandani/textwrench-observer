@@ -404,36 +404,39 @@ class SelectionObserver {
         NSPasteboard.general.setString(text, forType: .string)
     }
 
-    func performPaste() {
-        // Get the current frontmost application
-        guard let currentApp = NSWorkspace.shared.frontmostApplication else {
-            NSLog("Failed to get frontmost application")
-            return
-        }
-        
-        // Activate the app with a small delay to ensure focus
-        currentApp.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-        
-        // Small delay to allow window activation to complete
-        usleep(100000) // 100ms delay
-        
-        // Create the paste command
-        let src = CGEventSource(stateID: .hidSystemState)
-        let loc = CGEventTapLocation.cghidEventTap
-        
-        // Send Command-V keypress
-        let keyVDown = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true)
-        keyVDown?.flags = .maskCommand
-        let keyVUp = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false)
-        keyVUp?.flags = .maskCommand
-        
-        // Post the events with small delays between them
-        keyVDown?.post(tap: loc)
-        usleep(30000) // 30ms delay between key down and up
-        keyVUp?.post(tap: loc)
-        
-        NSLog("Paste performed in \(currentApp.localizedName ?? "unknown app")")
+   func performPaste() {
+    // Hide the Electron toolbar immediately by sending reset signal
+    sendResetSignal()
+    
+    // Get the current frontmost application (should be the native app, not Electron)
+    guard let currentApp = NSWorkspace.shared.frontmostApplication else {
+        NSLog("Failed to get frontmost application")
+        return
     }
+    
+    // Activate the app with a small delay to ensure focus
+    currentApp.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+    
+    // Small delay to allow window activation to complete
+    usleep(150000) // Increased to 150ms for more reliable activation
+    
+    // Create the paste command
+    let src = CGEventSource(stateID: .hidSystemState)
+    let loc = CGEventTapLocation.cghidEventTap
+    
+    // Send Command-V keypress
+    let keyVDown = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true)
+    keyVDown?.flags = .maskCommand
+    let keyVUp = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false)
+    keyVUp?.flags = .maskCommand
+    
+    // Post the events with small delays between them
+    keyVDown?.post(tap: loc)
+    usleep(50000) // 50ms delay between key down and up
+    keyVUp?.post(tap: loc)
+    
+    NSLog("Paste performed in \(currentApp.localizedName ?? "unknown app")")
+}
 
     func run() {
         CFRunLoopRun()
