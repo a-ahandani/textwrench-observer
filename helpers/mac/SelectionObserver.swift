@@ -446,70 +446,105 @@ class SelectionObserver {
     }
 
     func performPaste(targetAppPID: pid_t?) {
-        // Disable event tap during paste operation to prevent interference
+        // 1. Disable event monitoring to prevent interference
         if let eventTap = eventTap {
             CGEvent.tapEnable(tap: eventTap, enable: false)
         }
         
         defer {
-            // Re-enable event tap after short delay
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                 self?.ensureEventTapActive()
             }
         }
         
         sendResetSignal()
-        NSLog("=== Starting paste operation ===")
+        NSLog("=== STARTING PASTE OPERATION ===")
         
-        let pidToUse = targetAppPID ?? (lastWindowInfo?["appPID"] as? pid_t)
+        guard let pid = targetAppPID ?? (lastWindowInfo?["appPID"] as? pid_t) else {
+            NSLog("No target PID available")
+            return
+        }
         
-        if let pid = pidToUse {
-            NSLog("Targeting app with PID: \(pid)")
+        NSLog("Targeting app with PID: \(pid)")
+        
+        // 2. Get the app reference
+        let appRef = AXUIElementCreateApplication(pid)
+        
+        // 3. Activate the app using NSRunningApplication
+        if let app = NSRunningApplication(processIdentifier: pid) {
+            // First try standard activation
+            let activated = app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            NSLog("Standard activation \(activated ? "succeeded" : "failed")")
             
-            // Get the application reference
-            let appRef = AXUIElementCreateApplication(pid)
-            
-            // Activate the app
-            if let app = NSRunningApplication(processIdentifier: pid) {
-                let activated = app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-                NSLog("App activation \(activated ? "successful" : "failed")")
+            // 4. Double-check and force activation if needed
+            var retryCount = 0
+            while retryCount < 3 {
+                usleep(500000) // 500ms delay
                 
-                // Longer delay for app to become active
-                usleep(500000) // 500ms
-                
-                // Verify activation
-                if let frontmostApp = NSWorkspace.shared.frontmostApplication {
-                    let success = frontmostApp.processIdentifier == pid
-                    NSLog("Frontmost app: \(frontmostApp.localizedName ?? "unknown") (\(frontmostApp.processIdentifier)) - \(success ? "Correct" : "Incorrect")")
-                    
-                    if success {
-                        // Focus the main window
-                        var windowRef: CFTypeRef?
-                        if AXUIElementCopyAttributeValue(appRef, kAXMainWindowAttribute as CFString, &windowRef) == .success,
-                        let window = windowRef {
-                            AXUIElementSetAttributeValue(window as! AXUIElement, kAXMainAttribute as CFString, kCFBooleanTrue)
-                            usleep(300000) // 300ms for window focus
-                        }
-                    }
+                if let frontmost = NSWorkspace.shared.frontmostApplication,
+                frontmost.processIdentifier == pid {
+                    break // Success!
                 }
+                
+                // Fallback: Use AppleScript to force activation
+                let script = """
+                tell application "System Events"
+                    set frontmost of process whose unix id is \(pid) to true
+                end tell
+                """
+                
+                let task = Process()
+                task.launchPath = "/usr/bin/osascript"
+                task.arguments = ["-e", script]
+                task.launch()
+                task.waitUntilExit()
+                
+                retryCount += 1
+                NSLog("Retry \(retryCount): Forced activation attempt")
             }
         }
         
-        // Perform the paste
+        // 5. Focus the main window
+        var windowRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(appRef, kAXMainWindowAttribute as CFString, &windowRef) == .success,
+        let window = windowRef {
+            
+            // Bring window to front
+            AXUIElementSetAttributeValue(window as! AXUIElement, kAXMainAttribute as CFString, kCFBooleanTrue)
+            
+            // Extra insurance - set focused attribute
+            AXUIElementSetAttributeValue(window as! AXUIElement, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            
+            usleep(300000) // 300ms for window to come forward
+        }
+        
+        // 6. Verify window is ready
+        if let frontmost = NSWorkspace.shared.frontmostApplication {
+            let isReady = frontmost.processIdentifier == pid
+            NSLog("Final check: \(frontmost.localizedName ?? "unknown") (\(frontmost.processIdentifier)) - \(isReady ? "READY" : "NOT READY")")
+            
+            if !isReady {
+                NSLog("Window failed to come to foreground")
+                return
+            }
+        }
+        
+        // 7. Perform the paste
         NSLog("Executing paste command")
         let src = CGEventSource(stateID: .hidSystemState)
         let loc = CGEventTapLocation.cghidEventTap
         
-        let keyVDown = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true)
-        keyVDown?.flags = .maskCommand
-        let keyVUp = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false)
-        keyVUp?.flags = .maskCommand
+        let keyDown = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true)
+        keyDown?.flags = .maskCommand
         
-        keyVDown?.post(tap: loc)
-        usleep(100000) // 100ms between key down/up
-        keyVUp?.post(tap: loc)
+        let keyUp = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false)
+        keyUp?.flags = .maskCommand
         
-        NSLog("=== Paste operation completed ===")
+        keyDown?.post(tap: loc)
+        usleep(100000) // 100ms delay
+        keyUp?.post(tap: loc)
+        
+        NSLog("=== PASTE COMPLETED ===")
     }
 
     func run() {
