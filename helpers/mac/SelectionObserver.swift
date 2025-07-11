@@ -452,41 +452,25 @@ class SelectionObserver {
         }
         
         defer {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
                 self?.ensureEventTapActive()
             }
         }
         
         sendResetSignal()
-        NSLog("=== STARTING PASTE OPERATION ===")
         
         guard let pid = targetAppPID ?? (lastWindowInfo?["appPID"] as? pid_t) else {
-            NSLog("No target PID available")
             return
         }
         
-        NSLog("Targeting app with PID: \(pid)")
-        
-        // 2. Get the app reference
+        // 2. Get the app reference and activate it
         let appRef = AXUIElementCreateApplication(pid)
         
-        // 3. Activate the app using NSRunningApplication
+        // Optimized activation sequence
         if let app = NSRunningApplication(processIdentifier: pid) {
-            // First try standard activation
-            let activated = app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-            NSLog("Standard activation \(activated ? "succeeded" : "failed")")
-            
-            // 4. Double-check and force activation if needed
-            var retryCount = 0
-            while retryCount < 3 {
-                usleep(500000) // 500ms delay
-                
-                if let frontmost = NSWorkspace.shared.frontmostApplication,
-                frontmost.processIdentifier == pid {
-                    break // Success!
-                }
-                
-                // Fallback: Use AppleScript to force activation
+            // Try quick activation first
+            if !app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps]) {
+                // Fallback to AppleScript if needed (but much faster)
                 let script = """
                 tell application "System Events"
                     set frontmost of process whose unix id is \(pid) to true
@@ -498,39 +482,19 @@ class SelectionObserver {
                 task.arguments = ["-e", script]
                 task.launch()
                 task.waitUntilExit()
-                
-                retryCount += 1
-                NSLog("Retry \(retryCount): Forced activation attempt")
             }
         }
         
-        // 5. Focus the main window
+        // 3. Focus the main window with minimal delay
         var windowRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(appRef, kAXMainWindowAttribute as CFString, &windowRef) == .success,
         let window = windowRef {
-            
-            // Bring window to front
             AXUIElementSetAttributeValue(window as! AXUIElement, kAXMainAttribute as CFString, kCFBooleanTrue)
-            
-            // Extra insurance - set focused attribute
             AXUIElementSetAttributeValue(window as! AXUIElement, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-            
-            usleep(300000) // 300ms for window to come forward
+            usleep(150000) // Reduced from 300ms to 150ms
         }
         
-        // 6. Verify window is ready
-        if let frontmost = NSWorkspace.shared.frontmostApplication {
-            let isReady = frontmost.processIdentifier == pid
-            NSLog("Final check: \(frontmost.localizedName ?? "unknown") (\(frontmost.processIdentifier)) - \(isReady ? "READY" : "NOT READY")")
-            
-            if !isReady {
-                NSLog("Window failed to come to foreground")
-                return
-            }
-        }
-        
-        // 7. Perform the paste
-        NSLog("Executing paste command")
+        // 4. Perform the paste with optimized timing
         let src = CGEventSource(stateID: .hidSystemState)
         let loc = CGEventTapLocation.cghidEventTap
         
@@ -541,10 +505,8 @@ class SelectionObserver {
         keyUp?.flags = .maskCommand
         
         keyDown?.post(tap: loc)
-        usleep(100000) // 100ms delay
+        usleep(30000) // Reduced from 100ms to 30ms
         keyUp?.post(tap: loc)
-        
-        NSLog("=== PASTE COMPLETED ===")
     }
 
     func run() {
