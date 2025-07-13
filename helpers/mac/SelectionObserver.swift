@@ -12,7 +12,7 @@ var selectionChangedHandler: ((Bool, Int) -> Void)?
 var mouseUpSelectionCheckTimer: Timer?
 var mouseIsDragging = false
 var lastWindowInfo: [String: Any]? = nil
-let mouseMovementThreshold: TimeInterval = 3.0 // 3 seconds threshold
+let mouseMovementThreshold: TimeInterval = 1.0 // 3 seconds threshold
 
 // MARK: - Helper Functions
 func currentMouseTopLeftPosition() -> (x: CGFloat, y: CGFloat) {
