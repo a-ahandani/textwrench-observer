@@ -18,7 +18,7 @@ var pendingSelectionText: String? = nil
 var pendingSelectionTimer: Timer? = nil
 var initialMousePosition: CGPoint? = nil
 let positionThreshold: CGFloat = 50.0 // pixels
-let timeThreshold: TimeInterval = 0.7 // seconds
+let timeThreshold: TimeInterval = 0.3 // seconds
 
 // MARK: - Helper Functions
 func currentMouseTopLeftPosition() -> (x: CGFloat, y: CGFloat) {
