@@ -16,9 +16,9 @@ var lastWindowInfo: [String: Any]? = nil
 // Variables for delayed signal sending
 var pendingSelectionText: String? = nil
 var pendingSelectionTimer: Timer? = nil
-var lastMousePosition: CGPoint? = nil
+var initialMousePosition: CGPoint? = nil
 let positionThreshold: CGFloat = 100.0 // pixels
-let timeThreshold: TimeInterval = 0.700 // seconds
+let timeThreshold: TimeInterval = 0.7 // seconds
 
 // MARK: - Helper Functions
 func currentMouseTopLeftPosition() -> (x: CGFloat, y: CGFloat) {
@@ -59,19 +59,7 @@ func sendResetSignal() {
     pendingSelectionText = nil
     pendingSelectionTimer?.invalidate()
     pendingSelectionTimer = nil
-}
-
-// Function to check if mouse has moved beyond threshold
-func mouseMovedBeyondThreshold(currentPos: CGPoint) -> Bool {
-    guard let lastPos = lastMousePosition else {
-        lastMousePosition = currentPos
-        return false
-    }
-    
-    let dx = abs(currentPos.x - lastPos.x)
-    let dy = abs(currentPos.y - lastPos.y)
-    
-    return dx > positionThreshold || dy > positionThreshold
+    initialMousePosition = nil
 }
 
 // MARK: - Mouse Event Callback
@@ -82,6 +70,7 @@ private func globalMouseEventCallback(
     refcon: UnsafeMutableRawPointer?
 ) -> Unmanaged<CGEvent>? {
     let pos = event.location
+    let currentPos = CGPoint(x: pos.x, y: pos.y)
 
     switch type {
     case .leftMouseDown, .rightMouseDown:
@@ -100,14 +89,18 @@ private func globalMouseEventCallback(
         mouseIsDragging = false
 
     case .mouseMoved:
-        // Track mouse movement for pending selection
-        let currentPos = CGPoint(x: pos.x, y: pos.y)
-        if mouseMovedBeyondThreshold(currentPos: currentPos) {
-            // Mouse moved beyond threshold, cancel pending selection
-            pendingSelectionTimer?.invalidate()
-            pendingSelectionTimer = nil
-            pendingSelectionText = nil
-            lastMousePosition = currentPos
+        // Check if we have a pending selection and initial mouse position
+        if pendingSelectionText != nil, let initialPos = initialMousePosition {
+            let dx = abs(currentPos.x - initialPos.x)
+            let dy = abs(currentPos.y - initialPos.y)
+            
+            // If mouse moved beyond threshold, cancel pending selection
+            if dx > positionThreshold || dy > positionThreshold {
+                pendingSelectionTimer?.invalidate()
+                pendingSelectionTimer = nil
+                pendingSelectionText = nil
+                initialMousePosition = nil
+            }
         }
         
         if popupShown, let popupPos = lastPopupPosition {
@@ -141,7 +134,6 @@ class SelectionObserver {
         listenForProcessedText()
     }
 
-    // Function to handle pending selection
     private func handlePendingSelection() {
         guard let pendingText = pendingSelectionText else { return }
         
@@ -160,6 +152,7 @@ class SelectionObserver {
         
         pendingSelectionText = nil
         pendingSelectionTimer = nil
+        initialMousePosition = nil
     }
 
     private func setupMouseEventListener() {
@@ -262,7 +255,6 @@ class SelectionObserver {
         isProcessingClipboard = true
         defer { isProcessingClipboard = false }
         
-        // Temporarily disable event tap
         if let eventTap = eventTap {
             CGEvent.tapEnable(tap: eventTap, enable: false)
         }
@@ -338,46 +330,19 @@ class SelectionObserver {
         let windowInfo = selection["window"] as? [String: Any]
         lastWindowInfo = windowInfo
         
-        // Define cases where we should try clipboard
-        let shouldTryClipboard: Bool
-        
-        if selectedText.isEmpty {
-            shouldTryClipboard = false
-        } else if selectedText == " " {
-            shouldTryClipboard = true
-        } else if selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            shouldTryClipboard = true
-        } else {
-            shouldTryClipboard = false
-        }
-        
-        let finalShouldTry = shouldTryClipboard && (wasDrag || clickCount == 2 || clickCount == 3)
-
-        if finalShouldTry {
-            if let clipboardText = getSelectedTextViaClipboard(), !clipboardText.isEmpty {
-                if !clipboardText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    // Schedule the signal to be sent after time threshold if no significant mouse movement
-                    pendingSelectionText = clipboardText
-                    pendingSelectionTimer?.invalidate()
-                    pendingSelectionTimer = Timer.scheduledTimer(withTimeInterval: timeThreshold, repeats: false) { [weak self] _ in
-                        self?.handlePendingSelection()
-                    }
-                    lastMousePosition = NSEvent.mouseLocation
-                }
-                return
-            }
-        }
-        
         let hasMeaningfulText = !selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         
         if (wasDrag || clickCount == 2 || clickCount == 3), hasMeaningfulText, selectedText != lastSelectionText {
-            // Schedule the signal to be sent after time threshold if no significant mouse movement
+            // Store initial mouse position when selection is made
+            let mousePos = NSEvent.mouseLocation
+            initialMousePosition = CGPoint(x: mousePos.x, y: mousePos.y)
+            
+            // Schedule the signal to be sent after time threshold
             pendingSelectionText = selectedText
             pendingSelectionTimer?.invalidate()
             pendingSelectionTimer = Timer.scheduledTimer(withTimeInterval: timeThreshold, repeats: false) { [weak self] _ in
                 self?.handlePendingSelection()
             }
-            lastMousePosition = NSEvent.mouseLocation
         }
         else if !hasMeaningfulText, popupShown {
             sendResetSignal()
@@ -419,7 +384,6 @@ class SelectionObserver {
     func listenForProcessedText() {
         DispatchQueue.global().async {
             while let line = readLine() {
-                // Parse the incoming JSON which may contain both text and appPID
                 if let data = line.data(using: .utf8),
                    let json = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] {
                     
@@ -429,7 +393,6 @@ class SelectionObserver {
                     self.copyToClipboard(text)
                     self.performPaste(targetAppPID: appPID)
                 } else {
-                    // Fallback for plain text input
                     self.copyToClipboard(line)
                     self.performPaste(targetAppPID: nil)
                 }
@@ -443,7 +406,6 @@ class SelectionObserver {
     }
 
     func performPaste(targetAppPID: pid_t?) {
-        // 1. Disable event monitoring to prevent interference
         if let eventTap = eventTap {
             CGEvent.tapEnable(tap: eventTap, enable: false)
         }
@@ -460,14 +422,10 @@ class SelectionObserver {
             return
         }
         
-        // 2. Get the app reference and activate it
         let appRef = AXUIElementCreateApplication(pid)
         
-        // Optimized activation sequence
         if let app = NSRunningApplication(processIdentifier: pid) {
-            // Try quick activation first
             if !app.activate(options: [.activateAllWindows]) {
-                // Fallback to AppleScript if needed (but much faster)
                 let script = """
                 tell application "System Events"
                     set frontmost of process whose unix id is \(pid) to true
@@ -482,16 +440,14 @@ class SelectionObserver {
             }
         }
         
-        // 3. Focus the main window with minimal delay
         var windowRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(appRef, kAXMainWindowAttribute as CFString, &windowRef) == .success,
         let window = windowRef {
             AXUIElementSetAttributeValue(window as! AXUIElement, kAXMainAttribute as CFString, kCFBooleanTrue)
             AXUIElementSetAttributeValue(window as! AXUIElement, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-            usleep(150000) // Reduced from 300ms to 150ms
+            usleep(150000)
         }
         
-        // 4. Perform the paste with optimized timing
         let src = CGEventSource(stateID: .hidSystemState)
         let loc = CGEventTapLocation.cghidEventTap
         
@@ -502,7 +458,7 @@ class SelectionObserver {
         keyUp?.flags = .maskCommand
         
         keyDown?.post(tap: loc)
-        usleep(30000) // Reduced from 100ms to 30ms
+        usleep(30000)
         keyUp?.post(tap: loc)
     }
 
