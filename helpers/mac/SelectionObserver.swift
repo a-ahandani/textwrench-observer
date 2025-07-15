@@ -13,6 +13,13 @@ var mouseUpSelectionCheckTimer: Timer?
 var mouseIsDragging = false
 var lastWindowInfo: [String: Any]? = nil
 
+// Variables for delayed signal sending
+var pendingSelectionText: String? = nil
+var pendingSelectionTimer: Timer? = nil
+var lastMousePosition: CGPoint? = nil
+let positionThreshold: CGFloat = 100.0 // pixels
+let timeThreshold: TimeInterval = 0.700 // seconds
+
 // MARK: - Helper Functions
 func currentMouseTopLeftPosition() -> (x: CGFloat, y: CGFloat) {
     let mouseLocation = NSEvent.mouseLocation
@@ -47,9 +54,27 @@ func sendResetSignal() {
     lastPopupPosition = nil
     lastSelectionText = ""
     lastWindowInfo = nil
+    
+    // Cancel any pending selection
+    pendingSelectionText = nil
+    pendingSelectionTimer?.invalidate()
+    pendingSelectionTimer = nil
 }
 
-// MARK: - Mouse Event Handling
+// Function to check if mouse has moved beyond threshold
+func mouseMovedBeyondThreshold(currentPos: CGPoint) -> Bool {
+    guard let lastPos = lastMousePosition else {
+        lastMousePosition = currentPos
+        return false
+    }
+    
+    let dx = abs(currentPos.x - lastPos.x)
+    let dy = abs(currentPos.y - lastPos.y)
+    
+    return dx > positionThreshold || dy > positionThreshold
+}
+
+// MARK: - Mouse Event Callback
 private func globalMouseEventCallback(
     proxy: CGEventTapProxy,
     type: CGEventType,
@@ -75,6 +100,16 @@ private func globalMouseEventCallback(
         mouseIsDragging = false
 
     case .mouseMoved:
+        // Track mouse movement for pending selection
+        let currentPos = CGPoint(x: pos.x, y: pos.y)
+        if mouseMovedBeyondThreshold(currentPos: currentPos) {
+            // Mouse moved beyond threshold, cancel pending selection
+            pendingSelectionTimer?.invalidate()
+            pendingSelectionTimer = nil
+            pendingSelectionText = nil
+            lastMousePosition = currentPos
+        }
+        
         if popupShown, let popupPos = lastPopupPosition {
             let dx = abs(pos.x - popupPos.x)
             let dy = abs(pos.y - popupPos.y)
@@ -106,6 +141,27 @@ class SelectionObserver {
         listenForProcessedText()
     }
 
+    // Function to handle pending selection
+    private func handlePendingSelection() {
+        guard let pendingText = pendingSelectionText else { return }
+        
+        let mousePos = currentMouseTopLeftPosition()
+        lastSelectionText = pendingText
+        lastPopupPosition = CGPoint(x: mousePos.x, y: mousePos.y)
+        popupShown = true
+        
+        let selectionData: [String: Any] = [
+            "text": pendingText,
+            "position": ["x": mousePos.x, "y": mousePos.y],
+            "isEditable": false,
+            "window": lastWindowInfo ?? [:]
+        ]
+        sendSignalIfChanged(selectionData)
+        
+        pendingSelectionText = nil
+        pendingSelectionTimer = nil
+    }
+
     private func setupMouseEventListener() {
         startMouseEventListener { [weak self] wasDrag, clickCount in
             self?.handleSelectionOrDeselection(wasDrag: wasDrag, clickCount: clickCount)
@@ -132,7 +188,6 @@ class SelectionObserver {
         
         let pid = frontApp.processIdentifier
         let appElement = AXUIElementCreateApplication(pid)
-        var isEditable = false
         var windowInfo: [String: Any] = [
             "appName": frontApp.localizedName ?? "unknown",
             "appPID": pid,
@@ -156,29 +211,6 @@ class SelectionObserver {
                 }
             }
             
-            // Check editable status
-            var editableRef: CFTypeRef?
-            if AXUIElementCopyAttributeValue(element, "AXEditable" as CFString, &editableRef) == .success {
-                isEditable = editableRef as? Bool ?? false
-            }
-            
-            if !isEditable {
-                var roleRef: CFTypeRef?
-                if AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef) == .success,
-                   let role = roleRef as? String {
-                    isEditable = ["AXTextField", "AXTextArea", "AXComboBox"].contains(role)
-                }
-            }
-            
-            if !isEditable {
-                var actionsRef: CFTypeRef?
-                if AXUIElementCopyAttributeValue(element, "AXActions" as CFString, &actionsRef) == .success,
-                   let actions = actionsRef as? [String] {
-                    isEditable = actions.contains("AXSetSelectedText") || 
-                                actions.contains("AXInsertText")
-                }
-            }
-
             // Get selected text
             var selectedTextRef: CFTypeRef?
             if AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
@@ -187,7 +219,7 @@ class SelectionObserver {
                 return [
                     "text": selectedText,
                     "position": ["x": mousePos.x, "y": mousePos.y],
-                    "isEditable": isEditable,
+                    "isEditable": false,
                     "window": windowInfo
                 ]
             }
@@ -205,29 +237,6 @@ class SelectionObserver {
                let title = titleRef as? String {
                 windowInfo["windowTitle"] = title
             }
-            
-            // Check editable status
-            var editableRef: CFTypeRef?
-            if AXUIElementCopyAttributeValue(windowElement, "AXEditable" as CFString, &editableRef) == .success {
-                isEditable = editableRef as? Bool ?? false
-            }
-            
-            if !isEditable {
-                var roleRef: CFTypeRef?
-                if AXUIElementCopyAttributeValue(windowElement, kAXRoleAttribute as CFString, &roleRef) == .success,
-                   let role = roleRef as? String {
-                    isEditable = ["AXTextField", "AXTextArea", "AXComboBox"].contains(role)
-                }
-            }
-            
-            if !isEditable {
-                var actionsRef: CFTypeRef?
-                if AXUIElementCopyAttributeValue(windowElement, "AXActions" as CFString, &actionsRef) == .success,
-                   let actions = actionsRef as? [String] {
-                    isEditable = actions.contains("AXSetSelectedText") || 
-                                actions.contains("AXInsertText")
-                }
-            }
 
             var selectedTextRef: CFTypeRef?
             if AXUIElementCopyAttributeValue(windowElement, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
@@ -236,7 +245,7 @@ class SelectionObserver {
                 return [
                     "text": selectedText,
                     "position": ["x": mousePos.x, "y": mousePos.y],
-                    "isEditable": isEditable,
+                    "isEditable": false,
                     "window": windowInfo
                 ]
             }
@@ -326,7 +335,6 @@ class SelectionObserver {
         }
         
         let selectedText = selection["text"] as? String ?? ""
-        let isEditable = selection["isEditable"] as? Bool ?? false
         let windowInfo = selection["window"] as? [String: Any]
         lastWindowInfo = windowInfo
         
@@ -344,23 +352,17 @@ class SelectionObserver {
         }
         
         let finalShouldTry = shouldTryClipboard && (wasDrag || clickCount == 2 || clickCount == 3)
-        // NSLog("Selected text: '\(selectedText)' isEditable: \(isEditable). Should try clipboard: \(finalShouldTry)")
 
         if finalShouldTry {
             if let clipboardText = getSelectedTextViaClipboard(), !clipboardText.isEmpty {
                 if !clipboardText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    let mousePos = currentMouseTopLeftPosition()
-                    lastSelectionText = clipboardText
-                    lastPopupPosition = CGPoint(x: mousePos.x, y: mousePos.y)
-                    popupShown = true
-                    
-                    let selectionData: [String: Any] = [
-                        "text": clipboardText,
-                        "position": ["x": mousePos.x, "y": mousePos.y],
-                        "isEditable": isEditable,
-                        "window": windowInfo ?? [:]
-                    ]
-                    sendSignalIfChanged(selectionData)
+                    // Schedule the signal to be sent after time threshold if no significant mouse movement
+                    pendingSelectionText = clipboardText
+                    pendingSelectionTimer?.invalidate()
+                    pendingSelectionTimer = Timer.scheduledTimer(withTimeInterval: timeThreshold, repeats: false) { [weak self] _ in
+                        self?.handlePendingSelection()
+                    }
+                    lastMousePosition = NSEvent.mouseLocation
                 }
                 return
             }
@@ -369,18 +371,13 @@ class SelectionObserver {
         let hasMeaningfulText = !selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         
         if (wasDrag || clickCount == 2 || clickCount == 3), hasMeaningfulText, selectedText != lastSelectionText {
-            lastSelectionText = selectedText
-            let mousePos = currentMouseTopLeftPosition()
-            lastPopupPosition = CGPoint(x: mousePos.x, y: mousePos.y)
-            popupShown = true
-            
-            let selectionData: [String: Any] = [
-                "text": selectedText,
-                "position": ["x": mousePos.x, "y": mousePos.y],
-                "isEditable": isEditable,
-                "window": windowInfo ?? [:]
-            ]
-            sendSignalIfChanged(selectionData)
+            // Schedule the signal to be sent after time threshold if no significant mouse movement
+            pendingSelectionText = selectedText
+            pendingSelectionTimer?.invalidate()
+            pendingSelectionTimer = Timer.scheduledTimer(withTimeInterval: timeThreshold, repeats: false) { [weak self] _ in
+                self?.handlePendingSelection()
+            }
+            lastMousePosition = NSEvent.mouseLocation
         }
         else if !hasMeaningfulText, popupShown {
             sendResetSignal()
@@ -469,7 +466,7 @@ class SelectionObserver {
         // Optimized activation sequence
         if let app = NSRunningApplication(processIdentifier: pid) {
             // Try quick activation first
-            if !app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps]) {
+            if !app.activate(options: [.activateAllWindows]) {
                 // Fallback to AppleScript if needed (but much faster)
                 let script = """
                 tell application "System Events"
