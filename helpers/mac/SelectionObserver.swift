@@ -89,20 +89,7 @@ private func globalMouseEventCallback(
         mouseIsDragging = false
 
     case .mouseMoved:
-        // Check if we have a pending selection and initial mouse position
-        if pendingSelectionText != nil, let initialPos = initialMousePosition {
-            let dx = abs(currentPos.x - initialPos.x)
-            let dy = abs(currentPos.y - initialPos.y)
-            
-            // If mouse moved beyond threshold, cancel pending selection
-            if dx > positionThreshold || dy > positionThreshold {
-                pendingSelectionTimer?.invalidate()
-                pendingSelectionTimer = nil
-                pendingSelectionText = nil
-                initialMousePosition = nil
-            }
-        }
-        
+        // Update mouse position but don't cancel here - we'll check in the timer
         if popupShown, let popupPos = lastPopupPosition {
             let dx = abs(pos.x - popupPos.x)
             let dy = abs(pos.y - popupPos.y)
@@ -122,6 +109,7 @@ class SelectionObserver {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var isProcessingClipboard = false
+    private var lastMousePosition: CGPoint?
 
     init() {
         setupMouseEventListener()
@@ -137,18 +125,29 @@ class SelectionObserver {
     private func handlePendingSelection() {
         guard let pendingText = pendingSelectionText else { return }
         
-        let mousePos = currentMouseTopLeftPosition()
-        lastSelectionText = pendingText
-        lastPopupPosition = CGPoint(x: mousePos.x, y: mousePos.y)
-        popupShown = true
+        // Get current mouse position
+        let currentMousePos = NSEvent.mouseLocation
+        let initialPos = initialMousePosition ?? currentMousePos
         
-        let selectionData: [String: Any] = [
-            "text": pendingText,
-            "position": ["x": mousePos.x, "y": mousePos.y],
-            "isEditable": false,
-            "window": lastWindowInfo ?? [:]
-        ]
-        sendSignalIfChanged(selectionData)
+        // Calculate distance moved
+        let dx = abs(currentMousePos.x - initialPos.x)
+        let dy = abs(currentMousePos.y - initialPos.y)
+        
+        // Only send if movement is <= threshold
+        if dx <= positionThreshold && dy <= positionThreshold {
+            let mousePos = currentMouseTopLeftPosition()
+            lastSelectionText = pendingText
+            lastPopupPosition = CGPoint(x: mousePos.x, y: mousePos.y)
+            popupShown = true
+            
+            let selectionData: [String: Any] = [
+                "text": pendingText,
+                "position": ["x": mousePos.x, "y": mousePos.y],
+                "isEditable": false,
+                "window": lastWindowInfo ?? [:]
+            ]
+            sendSignalIfChanged(selectionData)
+        }
         
         pendingSelectionText = nil
         pendingSelectionTimer = nil
