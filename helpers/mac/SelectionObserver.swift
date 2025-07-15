@@ -17,7 +17,7 @@ var lastWindowInfo: [String: Any]? = nil
 var pendingSelectionText: String? = nil
 var pendingSelectionTimer: Timer? = nil
 var initialMousePosition: CGPoint? = nil
-let positionThreshold: CGFloat = 100.0 // pixels
+let positionThreshold: CGFloat = 50.0 // pixels
 let timeThreshold: TimeInterval = 0.7 // seconds
 
 // MARK: - Helper Functions
