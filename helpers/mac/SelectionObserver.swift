@@ -70,8 +70,17 @@ private func globalMouseEventCallback(
     event: CGEvent,
     refcon: UnsafeMutableRawPointer?
 ) -> Unmanaged<CGEvent>? {
+    // First check if this is a Command+C key event that we should ignore
+    if type == .keyDown {
+        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        let flags = event.flags
+        if keyCode == 8 && flags.contains(.maskCommand) {  // 8 is 'C' key
+            return Unmanaged.passUnretained(event)  // Let it pass through normally
+        }
+    }
+    
     let pos = event.location
-    let currentPos = CGPoint(x: pos.x, y: pos.y)
+    _ = CGPoint(x: pos.x, y: pos.y)  // Removed unused variable
     
     // Check for command key state changes
     let flags = event.flags
@@ -370,21 +379,23 @@ class SelectionObserver {
     func startMouseEventListener(selectionChanged: @escaping (Bool, Int) -> Void) {
         selectionChangedHandler = selectionChanged
 
-        let mouseEventMask =
-            (1 << CGEventType.leftMouseUp.rawValue) |
-            (1 << CGEventType.rightMouseUp.rawValue) |
-            (1 << CGEventType.mouseMoved.rawValue) |
-            (1 << CGEventType.leftMouseDragged.rawValue) |
-            (1 << CGEventType.rightMouseDragged.rawValue) |
-            (1 << CGEventType.leftMouseDown.rawValue) |
-            (1 << CGEventType.rightMouseDown.rawValue) |
-            (1 << CGEventType.flagsChanged.rawValue)
+        // Break up the large expression to avoid compiler timeout
+        var mouseEventMask: CGEventMask = 0
+        mouseEventMask |= (1 << CGEventType.leftMouseUp.rawValue)
+        mouseEventMask |= (1 << CGEventType.rightMouseUp.rawValue)
+        mouseEventMask |= (1 << CGEventType.mouseMoved.rawValue)
+        mouseEventMask |= (1 << CGEventType.leftMouseDragged.rawValue)
+        mouseEventMask |= (1 << CGEventType.rightMouseDragged.rawValue)
+        mouseEventMask |= (1 << CGEventType.leftMouseDown.rawValue)
+        mouseEventMask |= (1 << CGEventType.rightMouseDown.rawValue)
+        mouseEventMask |= (1 << CGEventType.flagsChanged.rawValue)
+        mouseEventMask |= (1 << CGEventType.keyDown.rawValue)
 
         eventTap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
             options: .defaultTap,
-            eventsOfInterest: CGEventMask(mouseEventMask),
+            eventsOfInterest: mouseEventMask,
             callback: globalMouseEventCallback,
             userInfo: nil
         )
