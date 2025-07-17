@@ -12,6 +12,7 @@ var selectionChangedHandler: ((Bool, Int) -> Void)?
 var mouseUpSelectionCheckTimer: Timer?
 var mouseIsDragging = false
 var lastWindowInfo: [String: Any]? = nil
+var shiftKeyPressed = false
 
 // Variables for delayed signal sending
 var pendingSelectionText: String? = nil
@@ -71,6 +72,17 @@ private func globalMouseEventCallback(
 ) -> Unmanaged<CGEvent>? {
     let pos = event.location
     let currentPos = CGPoint(x: pos.x, y: pos.y)
+    
+    // Check for shift key state changes
+    let flags = event.flags
+    let newShiftState = flags.contains(.maskShift)
+    
+    if newShiftState != shiftKeyPressed {
+        shiftKeyPressed = newShiftState
+        if !shiftKeyPressed {
+            sendResetSignal()
+        }
+    }
 
     switch type {
     case .leftMouseDown, .rightMouseDown:
@@ -123,7 +135,7 @@ class SelectionObserver {
     }
 
     private func handlePendingSelection() {
-        guard let pendingText = pendingSelectionText else { return }
+        guard shiftKeyPressed, let pendingText = pendingSelectionText else { return }
         
         // Get current mouse position
         let currentMousePos = NSEvent.mouseLocation
@@ -318,6 +330,13 @@ class SelectionObserver {
     }
 
     func handleSelectionOrDeselection(wasDrag: Bool, clickCount: Int) {
+        guard shiftKeyPressed else {
+            if popupShown {
+                sendResetSignal()
+            }
+            return
+        }
+        
         guard let selection = SelectionObserver.currentSelection() else {
             if popupShown {
                 sendResetSignal()
@@ -358,7 +377,8 @@ class SelectionObserver {
             (1 << CGEventType.leftMouseDragged.rawValue) |
             (1 << CGEventType.rightMouseDragged.rawValue) |
             (1 << CGEventType.leftMouseDown.rawValue) |
-            (1 << CGEventType.rightMouseDown.rawValue)
+            (1 << CGEventType.rightMouseDown.rawValue) |
+            (1 << CGEventType.flagsChanged.rawValue)
 
         eventTap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
