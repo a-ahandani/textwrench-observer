@@ -12,7 +12,7 @@ var selectionChangedHandler: ((Bool, Int) -> Void)?
 var mouseUpSelectionCheckTimer: Timer?
 var mouseIsDragging = false
 var lastWindowInfo: [String: Any]? = nil
-var shiftKeyPressed = false
+var commandKeyPressed = false
 
 // Variables for delayed signal sending
 var pendingSelectionText: String? = nil
@@ -73,14 +73,14 @@ private func globalMouseEventCallback(
     let pos = event.location
     let currentPos = CGPoint(x: pos.x, y: pos.y)
     
-    // Check for shift key state changes
+    // Check for command key state changes
     let flags = event.flags
-    let newShiftState = flags.contains(.maskShift)
+    let newCommandState = flags.contains(.maskCommand)
     
-    if newShiftState != shiftKeyPressed {
-        shiftKeyPressed = newShiftState
-        if !shiftKeyPressed {
-            sendResetSignal()
+    if newCommandState != commandKeyPressed {
+        commandKeyPressed = newCommandState
+        if !commandKeyPressed {
+            // sendResetSignal()
         }
     }
 
@@ -135,7 +135,7 @@ class SelectionObserver {
     }
 
     private func handlePendingSelection() {
-        guard shiftKeyPressed, let pendingText = pendingSelectionText else { return }
+        guard commandKeyPressed, let pendingText = pendingSelectionText else { return }
         
         // Get current mouse position
         let currentMousePos = NSEvent.mouseLocation
@@ -330,7 +330,7 @@ class SelectionObserver {
     }
 
     func handleSelectionOrDeselection(wasDrag: Bool, clickCount: Int) {
-        guard shiftKeyPressed else {
+        guard commandKeyPressed else {
             if popupShown {
                 sendResetSignal()
             }
