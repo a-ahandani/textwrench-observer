@@ -12,7 +12,6 @@ var selectionChangedHandler: ((Bool, Int) -> Void)?
 var mouseUpSelectionCheckTimer: Timer?
 var mouseIsDragging = false
 var lastWindowInfo: [String: Any]? = nil
-var optionKeyPressed = false
 
 // Variables for delayed signal sending
 var pendingSelectionText: String? = nil
@@ -70,27 +69,8 @@ private func globalMouseEventCallback(
     event: CGEvent,
     refcon: UnsafeMutableRawPointer?
 ) -> Unmanaged<CGEvent>? {
-    // First check if this is a Command+C key event that we should ignore
-    if type == .keyDown {
-        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-        let flags = event.flags
-        if keyCode == 8 && flags.contains(.maskCommand) {  // 8 is 'C' key
-            return Unmanaged.passUnretained(event)  // Let it pass through normally
-        }
-    }
-    
     let pos = event.location
-    _ = CGPoint(x: pos.x, y: pos.y)  // Removed unused variable
-    
-    // Check for option key state changes
-    let flags = event.flags
-    let newOptionState = flags.contains(.maskAlternate)
-    
-    if newOptionState != optionKeyPressed {
-        optionKeyPressed = newOptionState
-        if !optionKeyPressed {
-        }
-    }
+    let currentPos = CGPoint(x: pos.x, y: pos.y)
 
     switch type {
     case .leftMouseDown, .rightMouseDown:
@@ -113,7 +93,7 @@ private func globalMouseEventCallback(
         if popupShown, let popupPos = lastPopupPosition {
             let dx = abs(pos.x - popupPos.x)
             let dy = abs(pos.y - popupPos.y)
-            if dx > 250 || dy > 200 {
+            if dx > 130 || dy > 80 {
                 sendResetSignal()
             }
         }
@@ -143,7 +123,7 @@ class SelectionObserver {
     }
 
     private func handlePendingSelection() {
-        guard optionKeyPressed, let pendingText = pendingSelectionText else { return }
+        guard let pendingText = pendingSelectionText else { return }
         
         // Get current mouse position
         let currentMousePos = NSEvent.mouseLocation
@@ -338,13 +318,6 @@ class SelectionObserver {
     }
 
     func handleSelectionOrDeselection(wasDrag: Bool, clickCount: Int) {
-        guard optionKeyPressed else {
-            if popupShown {
-                sendResetSignal()
-            }
-            return
-        }
-        
         guard let selection = SelectionObserver.currentSelection() else {
             if popupShown {
                 sendResetSignal()
@@ -378,23 +351,20 @@ class SelectionObserver {
     func startMouseEventListener(selectionChanged: @escaping (Bool, Int) -> Void) {
         selectionChangedHandler = selectionChanged
 
-        // Break up the large expression to avoid compiler timeout
-        var mouseEventMask: CGEventMask = 0
-        mouseEventMask |= (1 << CGEventType.leftMouseUp.rawValue)
-        mouseEventMask |= (1 << CGEventType.rightMouseUp.rawValue)
-        mouseEventMask |= (1 << CGEventType.mouseMoved.rawValue)
-        mouseEventMask |= (1 << CGEventType.leftMouseDragged.rawValue)
-        mouseEventMask |= (1 << CGEventType.rightMouseDragged.rawValue)
-        mouseEventMask |= (1 << CGEventType.leftMouseDown.rawValue)
-        mouseEventMask |= (1 << CGEventType.rightMouseDown.rawValue)
-        mouseEventMask |= (1 << CGEventType.flagsChanged.rawValue)
-        mouseEventMask |= (1 << CGEventType.keyDown.rawValue)
+        let mouseEventMask =
+            (1 << CGEventType.leftMouseUp.rawValue) |
+            (1 << CGEventType.rightMouseUp.rawValue) |
+            (1 << CGEventType.mouseMoved.rawValue) |
+            (1 << CGEventType.leftMouseDragged.rawValue) |
+            (1 << CGEventType.rightMouseDragged.rawValue) |
+            (1 << CGEventType.leftMouseDown.rawValue) |
+            (1 << CGEventType.rightMouseDown.rawValue)
 
         eventTap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
             options: .defaultTap,
-            eventsOfInterest: mouseEventMask,
+            eventsOfInterest: CGEventMask(mouseEventMask),
             callback: globalMouseEventCallback,
             userInfo: nil
         )
