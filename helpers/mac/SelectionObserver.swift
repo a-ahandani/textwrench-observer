@@ -8,7 +8,7 @@ var lastPopupPosition: CGPoint? = nil
 var popupShown: Bool = false
 var lastSelectionText: String = ""
 var lastSentSignal: String?
-var selectionChangedHandler: ((Bool, Int) -> Void)?
+var selectionChangedHandler: ((Bool, Int, Bool) -> Void)?  // Added Bool for modifierKeyPressed
 var mouseUpSelectionCheckTimer: Timer?
 var mouseIsDragging = false
 var lastWindowInfo: [String: Any]? = nil
@@ -19,6 +19,10 @@ var pendingSelectionTimer: Timer? = nil
 var initialMousePosition: CGPoint? = nil
 let positionThreshold: CGFloat = 50.0 // pixels
 let timeThreshold: TimeInterval = 0.3 // seconds
+
+// Track if Option key was pressed during drag/up
+var modifierKeyWasPressed = false
+
 
 // MARK: - Helper Functions
 func currentMouseTopLeftPosition() -> (x: CGFloat, y: CGFloat) {
@@ -54,7 +58,7 @@ func sendResetSignal() {
     lastPopupPosition = nil
     lastSelectionText = ""
     lastWindowInfo = nil
-    
+
     // Cancel any pending selection
     pendingSelectionText = nil
     pendingSelectionTimer?.invalidate()
@@ -75,16 +79,21 @@ private func globalMouseEventCallback(
     switch type {
     case .leftMouseDown, .rightMouseDown:
         mouseIsDragging = false
+        modifierKeyWasPressed = event.flags.contains(.maskAlternate)  // Option key down at mouse down
 
     case .leftMouseDragged, .rightMouseDragged:
         mouseIsDragging = true
+        // Update modifier key state during drag
+        modifierKeyWasPressed = event.flags.contains(.maskAlternate)
 
     case .leftMouseUp, .rightMouseUp:
         mouseUpSelectionCheckTimer?.invalidate()
         let clickCount = Int(event.getIntegerValueField(.mouseEventClickState))
         let wasDrag = mouseIsDragging
+        // Check modifier key on mouse up as well
+        modifierKeyWasPressed = event.flags.contains(.maskAlternate)
         mouseUpSelectionCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { _ in
-            selectionChangedHandler?(wasDrag, clickCount)
+            selectionChangedHandler?(wasDrag, clickCount, modifierKeyWasPressed)
         }
         mouseIsDragging = false
 
@@ -122,7 +131,7 @@ class SelectionObserver {
         listenForProcessedText()
     }
 
-    private func handlePendingSelection() {
+    private func handlePendingSelection(modifierPressed: Bool) {
         guard let pendingText = pendingSelectionText else { return }
         
         // Get current mouse position
@@ -140,12 +149,18 @@ class SelectionObserver {
             lastPopupPosition = CGPoint(x: mousePos.x, y: mousePos.y)
             popupShown = true
             
-            let selectionData: [String: Any] = [
+            var selectionData: [String: Any] = [
                 "text": pendingText,
                 "position": ["x": mousePos.x, "y": mousePos.y],
                 "isEditable": false,
                 "window": lastWindowInfo ?? [:]
             ]
+            
+            // Add modifier flag ONLY if modifier key pressed during selection
+            if modifierPressed {
+                selectionData["modifier"] = "option"
+            }
+            
             sendSignalIfChanged(selectionData)
         }
         
@@ -155,8 +170,8 @@ class SelectionObserver {
     }
 
     private func setupMouseEventListener() {
-        startMouseEventListener { [weak self] wasDrag, clickCount in
-            self?.handleSelectionOrDeselection(wasDrag: wasDrag, clickCount: clickCount)
+        startMouseEventListener { [weak self] wasDrag, clickCount, modifierPressed in
+            self?.handleSelectionOrDeselection(wasDrag: wasDrag, clickCount: clickCount, modifierPressed: modifierPressed)
         }
     }
 
@@ -185,7 +200,7 @@ class SelectionObserver {
             "appPID": pid,
             "windowTitle": ""
         ]
-
+        
         // First try focused element
         var focusedElementRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedElementRef) == .success,
@@ -216,7 +231,7 @@ class SelectionObserver {
                 ]
             }
         }
-
+        
         // Fallback to main window
         var windowRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &windowRef) == .success,
@@ -229,7 +244,7 @@ class SelectionObserver {
                let title = titleRef as? String {
                 windowInfo["windowTitle"] = title
             }
-
+            
             var selectedTextRef: CFTypeRef?
             if AXUIElementCopyAttributeValue(windowElement, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
                let selectedText = selectedTextRef as? String {
@@ -317,7 +332,7 @@ class SelectionObserver {
         return nil
     }
 
-    func handleSelectionOrDeselection(wasDrag: Bool, clickCount: Int) {
+    func handleSelectionOrDeselection(wasDrag: Bool, clickCount: Int, modifierPressed: Bool) {
         guard let selection = SelectionObserver.currentSelection() else {
             if popupShown {
                 sendResetSignal()
@@ -336,11 +351,11 @@ class SelectionObserver {
             let mousePos = NSEvent.mouseLocation
             initialMousePosition = CGPoint(x: mousePos.x, y: mousePos.y)
             
-            // Schedule the signal to be sent after time threshold
+            // Schedule the signal to be sent after time threshold, pass modifierPressed flag
             pendingSelectionText = selectedText
             pendingSelectionTimer?.invalidate()
             pendingSelectionTimer = Timer.scheduledTimer(withTimeInterval: timeThreshold, repeats: false) { [weak self] _ in
-                self?.handlePendingSelection()
+                self?.handlePendingSelection(modifierPressed: modifierPressed)
             }
         }
         else if !hasMeaningfulText, popupShown {
@@ -348,7 +363,7 @@ class SelectionObserver {
         }
     }
 
-    func startMouseEventListener(selectionChanged: @escaping (Bool, Int) -> Void) {
+    func startMouseEventListener(selectionChanged: @escaping (Bool, Int, Bool) -> Void) {
         selectionChangedHandler = selectionChanged
 
         let mouseEventMask =
