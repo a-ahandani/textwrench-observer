@@ -5,6 +5,6 @@ onSelection(selection => {
   // Do whatever with selection
   // You do NOT need to call paste here
   // Later, in any other part of your app:
-  console.log("Selection changed:", selection.text);
+  console.log("Selection changed:", selection);
 });
 paste("my processed string to paste!");

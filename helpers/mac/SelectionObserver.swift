@@ -3,146 +3,244 @@
 import Cocoa
 import ApplicationServices
 
-// MARK: - Global Variables
-var lastPopupPosition: CGPoint? = nil
-var popupShown: Bool = false
-var lastSelectionText: String = ""
-var lastSentSignal: String?
-var selectionChangedHandler: ((Bool, Int, Bool) -> Void)?  // Added Bool for modifierKeyPressed
-var mouseUpSelectionCheckTimer: Timer?
-var mouseIsDragging = false
-var lastWindowInfo: [String: Any]? = nil
+// MARK: - Constants
+let kAXEditableAttribute = "AXEditable"
 
-// Variables for delayed signal sending
-var pendingSelectionText: String? = nil
-var pendingSelectionTimer: Timer? = nil
-var initialMousePosition: CGPoint? = nil
-let positionThreshold: CGFloat = 50.0 // pixels
-let timeThreshold: TimeInterval = 0.3 // seconds
-
-// Track if Option key was pressed during drag/up
-var modifierKeyWasPressed = false
-
-
-// MARK: - Helper Functions
-func currentMouseTopLeftPosition() -> (x: CGFloat, y: CGFloat) {
-    let mouseLocation = NSEvent.mouseLocation
-    let screen = NSScreen.screens.first(where: { NSMouseInRect(mouseLocation, $0.frame, false) }) ?? NSScreen.main
-    guard let screenFrame = screen?.frame else {
-        let h = NSScreen.main?.frame.height ?? 0
-        return (mouseLocation.x, h - mouseLocation.y)
+// MARK: - Modifier State Tracking
+struct ModifierFlags: OptionSet {
+    let rawValue: Int
+    
+    static let shift     = ModifierFlags(rawValue: 1 << 0)
+    static let control   = ModifierFlags(rawValue: 1 << 1)
+    static let option    = ModifierFlags(rawValue: 1 << 2)
+    static let command   = ModifierFlags(rawValue: 1 << 3)
+    
+    init(rawValue: Int) {
+        self.rawValue = rawValue
     }
-    let flippedY = screenFrame.origin.y + screenFrame.size.height - mouseLocation.y
-    return (mouseLocation.x, flippedY)
-}
-
-func sendSignalIfChanged(_ dict: [String: Any]) {
-    if let jsonData = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys]),
-       let jsonString = String(data: jsonData, encoding: .utf8) {
-        if jsonString != lastSentSignal {
-            print(jsonString, terminator: "\n")
-            fflush(stdout)
-            lastSentSignal = jsonString
-        }
+    
+    init(cgEventFlags: CGEventFlags) {
+        var flags = ModifierFlags()
+        if cgEventFlags.contains(.maskShift)    { flags.insert(.shift) }
+        if cgEventFlags.contains(.maskControl)  { flags.insert(.control) }
+        if cgEventFlags.contains(.maskAlternate) { flags.insert(.option) }
+        if cgEventFlags.contains(.maskCommand)   { flags.insert(.command) }
+        self = flags
     }
 }
 
-func sendResetSignal() {
-    let mousePos = currentMouseTopLeftPosition()
-    let empty: [String: Any] = [
-        "text": "",
-        "position": ["x": mousePos.x, "y": mousePos.y]
-    ]
-    sendSignalIfChanged(empty)
-    popupShown = false
-    lastPopupPosition = nil
-    lastSelectionText = ""
-    lastWindowInfo = nil
-
-    // Cancel any pending selection
-    pendingSelectionText = nil
-    pendingSelectionTimer?.invalidate()
-    pendingSelectionTimer = nil
-    initialMousePosition = nil
-}
-
-// MARK: - Mouse Event Callback
-private func globalMouseEventCallback(
-    proxy: CGEventTapProxy,
-    type: CGEventType,
-    event: CGEvent,
-    refcon: UnsafeMutableRawPointer?
-) -> Unmanaged<CGEvent>? {
-    let pos = event.location
-    let currentPos = CGPoint(x: pos.x, y: pos.y)
-
-    switch type {
-    case .leftMouseDown, .rightMouseDown:
-        mouseIsDragging = false
-        modifierKeyWasPressed = event.flags.contains(.maskAlternate)  // Option key down at mouse down
-
-    case .leftMouseDragged, .rightMouseDragged:
-        mouseIsDragging = true
-        // Update modifier key state during drag
-        modifierKeyWasPressed = event.flags.contains(.maskAlternate)
-
-    case .leftMouseUp, .rightMouseUp:
-        mouseUpSelectionCheckTimer?.invalidate()
-        let clickCount = Int(event.getIntegerValueField(.mouseEventClickState))
-        let wasDrag = mouseIsDragging
-        // Check modifier key on mouse up as well
-        modifierKeyWasPressed = event.flags.contains(.maskAlternate)
-        mouseUpSelectionCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { _ in
-            selectionChangedHandler?(wasDrag, clickCount, modifierKeyWasPressed)
+class ModifierState {
+    private(set) var currentFlags: ModifierFlags = []
+    private let debounceInterval: TimeInterval = 0.05
+    private var debounceTimer: Timer?
+    
+    func update(with event: CGEvent) {
+        let newFlags = ModifierFlags(cgEventFlags: event.flags)
+        
+        // Immediate update for mouse down events
+        if [.leftMouseDown, .rightMouseDown].contains(event.type) {
+            currentFlags = newFlags
+            return
         }
-        mouseIsDragging = false
-
-    case .mouseMoved:
-        // Update mouse position but don't cancel here - we'll check in the timer
-        if popupShown, let popupPos = lastPopupPosition {
-            let dx = abs(pos.x - popupPos.x)
-            let dy = abs(pos.y - popupPos.y)
-            if dx > 130 || dy > 80 {
-                sendResetSignal()
-            }
+        
+        // Debounced update for other events
+        debounceTimer?.invalidate()
+        debounceTimer = Timer.scheduledTimer(withTimeInterval: debounceInterval, repeats: false) { [weak self] _ in
+            self?.currentFlags = newFlags
         }
-    default:
-        break
     }
-    return Unmanaged.passRetained(event)
+    
+    func lockCurrentState() -> ModifierFlags {
+        debounceTimer?.invalidate()
+        return currentFlags
+    }
 }
 
-// MARK: - SelectionObserver Class
+// MARK: - Main Implementation
 class SelectionObserver {
-    private var timer: Timer?
+    // State tracking
+    private var lastPopupPosition: CGPoint?
+    private var popupShown: Bool = false
+    private var lastSelectionText: String = ""
+    private var lastSentSignal: String?
+    private var mouseIsDragging = false
+    private var lastWindowInfo: [String: Any]?
+    
+    // Modifier state
+    let modifierState = ModifierState()
+    
+    // Delayed selection handling
+    private var pendingSelectionText: String?
+    private var pendingSelectionTimer: Timer?
+    private var initialMousePosition: CGPoint?
+    private let positionThreshold: CGFloat = 50.0
+    private let timeThreshold: TimeInterval = 0.3
+    
+    // Event handling
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var mouseUpSelectionCheckTimer: Timer?
     private var isProcessingClipboard = false
-    private var lastMousePosition: CGPoint?
-
+    
+    // MARK: - Initialization
     init() {
         setupMouseEventListener()
+        setupApplicationNotifications()
+        listenForProcessedText()
+    }
+    
+    deinit {
+        invalidateTimers()
+        if let eventTap = eventTap {
+            CGEvent.tapEnable(tap: eventTap, enable: false)
+        }
+        if let runLoopSource = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
+        }
+    }
+    
+    // MARK: - Setup
+    private func setupApplicationNotifications() {
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
             selector: #selector(windowFocusChanged),
             name: NSWorkspace.didActivateApplicationNotification,
             object: nil
         )
-        listenForProcessedText()
     }
-
-    private func handlePendingSelection(modifierPressed: Bool) {
+    
+    private func invalidateTimers() {
+        mouseUpSelectionCheckTimer?.invalidate()
+        pendingSelectionTimer?.invalidate()
+    }
+    
+    // MARK: - Mouse Event Handling
+    private func setupMouseEventListener() {
+        let mouseEventMask =
+            (1 << CGEventType.leftMouseUp.rawValue) |
+            (1 << CGEventType.rightMouseUp.rawValue) |
+            (1 << CGEventType.mouseMoved.rawValue) |
+            (1 << CGEventType.leftMouseDragged.rawValue) |
+            (1 << CGEventType.rightMouseDragged.rawValue) |
+            (1 << CGEventType.leftMouseDown.rawValue) |
+            (1 << CGEventType.rightMouseDown.rawValue)
+        
+        let observerRef = Unmanaged.passUnretained(self).toOpaque()
+        
+        eventTap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: CGEventMask(mouseEventMask),
+            callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
+                let observer = Unmanaged<SelectionObserver>.fromOpaque(refcon!).takeUnretainedValue()
+                return observer.handleMouseEvent(proxy: proxy, type: type, event: event)
+            },
+            userInfo: observerRef
+        )
+        
+        if let eventTap = eventTap {
+            runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
+            CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
+            CGEvent.tapEnable(tap: eventTap, enable: true)
+        } else {
+            print("Error: Failed to create event tap. Accessibility permissions may be required.")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                self.setupMouseEventListener()
+            }
+        }
+    }
+    
+    private func handleMouseEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        modifierState.update(with: event)
+        
+        switch type {
+        case .leftMouseDown, .rightMouseDown:
+            mouseIsDragging = false
+            
+        case .leftMouseDragged, .rightMouseDragged:
+            mouseIsDragging = true
+            
+        case .leftMouseUp, .rightMouseUp:
+            handleMouseUp(event: event)
+            
+        case .mouseMoved:
+            handleMouseMoved(event: event)
+            
+        default:
+            break
+        }
+        
+        return Unmanaged.passRetained(event)
+    }
+    
+    private func handleMouseUp(event: CGEvent) {
+        mouseUpSelectionCheckTimer?.invalidate()
+        let clickCount = Int(event.getIntegerValueField(.mouseEventClickState))
+        let wasDrag = mouseIsDragging
+        let modifiers = modifierState.lockCurrentState()
+        
+        mouseUpSelectionCheckTimer = Timer.scheduledTimer(
+            withTimeInterval: 0.08,
+            repeats: false
+        ) { [weak self] _ in
+            self?.handleSelectionOrDeselection(
+                wasDrag: wasDrag,
+                clickCount: clickCount,
+                modifiers: modifiers
+            )
+        }
+        mouseIsDragging = false
+    }
+    
+    private func handleMouseMoved(event: CGEvent) {
+        if popupShown, let popupPos = lastPopupPosition {
+            let pos = event.location
+            let dx = abs(pos.x - popupPos.x)
+            let dy = abs(pos.y - popupPos.y)
+            if dx > 130 || dy > 80 {
+                sendResetSignal()
+            }
+        }
+    }
+    
+    // MARK: - Selection Handling
+    private func handleSelectionOrDeselection(wasDrag: Bool, clickCount: Int, modifiers: ModifierFlags) {
+        guard let selection = getCurrentSelection() else {
+            if popupShown { sendResetSignal() }
+            return
+        }
+        
+        let selectedText = selection["text"] as? String ?? ""
+        lastWindowInfo = selection["window"] as? [String: Any]
+        
+        let hasMeaningfulText = !selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        
+        if (wasDrag || clickCount >= 2), hasMeaningfulText, selectedText != lastSelectionText {
+            initialMousePosition = NSEvent.mouseLocation
+            pendingSelectionText = selectedText
+            pendingSelectionTimer?.invalidate()
+            
+            pendingSelectionTimer = Timer.scheduledTimer(
+                withTimeInterval: timeThreshold,
+                repeats: false
+            ) { [weak self] _ in
+                self?.handlePendingSelection(modifiers: modifiers)
+            }
+        } else if !hasMeaningfulText, popupShown {
+            sendResetSignal()
+        }
+    }
+    
+    private func handlePendingSelection(modifiers: ModifierFlags) {
         guard let pendingText = pendingSelectionText else { return }
         
-        // Get current mouse position
         let currentMousePos = NSEvent.mouseLocation
         let initialPos = initialMousePosition ?? currentMousePos
         
-        // Calculate distance moved
         let dx = abs(currentMousePos.x - initialPos.x)
         let dy = abs(currentMousePos.y - initialPos.y)
         
-        // Only send if movement is <= threshold
         if dx <= positionThreshold && dy <= positionThreshold {
             let mousePos = currentMouseTopLeftPosition()
             lastSelectionText = pendingText
@@ -156,9 +254,14 @@ class SelectionObserver {
                 "window": lastWindowInfo ?? [:]
             ]
             
-            // Add modifier flag ONLY if modifier key pressed during selection
-            if modifierPressed {
-                selectionData["modifier"] = "option"
+            if !modifiers.isEmpty {
+                var modifierStrings: [String] = []
+                if modifiers.contains(.shift)    { modifierStrings.append("shift") }
+                if modifiers.contains(.control)  { modifierStrings.append("control") }
+                if modifiers.contains(.option)   { modifierStrings.append("option") }
+                if modifiers.contains(.command)  { modifierStrings.append("command") }
+                
+                selectionData["modifiers"] = modifierStrings
             }
             
             sendSignalIfChanged(selectionData)
@@ -168,27 +271,9 @@ class SelectionObserver {
         pendingSelectionTimer = nil
         initialMousePosition = nil
     }
-
-    private func setupMouseEventListener() {
-        startMouseEventListener { [weak self] wasDrag, clickCount, modifierPressed in
-            self?.handleSelectionOrDeselection(wasDrag: wasDrag, clickCount: clickCount, modifierPressed: modifierPressed)
-        }
-    }
-
-    @objc func windowFocusChanged(_ notification: Notification? = nil) {
-        if popupShown {
-            sendResetSignal()
-        }
-        ensureEventTapActive()
-    }
-
-    func ensureEventTapActive() {
-        if let eventTap = eventTap, !CGEvent.tapIsEnabled(tap: eventTap) {
-            CGEvent.tapEnable(tap: eventTap, enable: true)
-        }
-    }
-
-    static func currentSelection() -> [String: Any]? {
+    
+    // MARK: - Selection Utilities
+    private func getCurrentSelection() -> [String: Any]? {
         guard let frontApp = NSWorkspace.shared.frontmostApplication else {
             return nil
         }
@@ -201,285 +286,306 @@ class SelectionObserver {
             "windowTitle": ""
         ]
         
-        // First try focused element
-        var focusedElementRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedElementRef) == .success,
-           let focusedElement = focusedElementRef {
-            let element = focusedElement as! AXUIElement
-            
-            // Get window title if available
-            var windowRef: CFTypeRef?
-            if AXUIElementCopyAttributeValue(element, kAXWindowAttribute as CFString, &windowRef) == .success,
-               let window = windowRef {
-                var titleRef: CFTypeRef?
-                if AXUIElementCopyAttributeValue(window as! AXUIElement, kAXTitleAttribute as CFString, &titleRef) == .success,
-                   let title = titleRef as? String {
-                    windowInfo["windowTitle"] = title
-                }
-            }
-            
-            // Get selected text
-            var selectedTextRef: CFTypeRef?
-            if AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
-               let selectedText = selectedTextRef as? String {
-                let mousePos = currentMouseTopLeftPosition()
-                return [
-                    "text": selectedText,
-                    "position": ["x": mousePos.x, "y": mousePos.y],
-                    "isEditable": false,
-                    "window": windowInfo
-                ]
-            }
+        // Try focused element first
+        if let focusedElement = getFocusedElement(appElement),
+           let (text, updatedWindowInfo) = getSelectedText(from: focusedElement, windowInfo: windowInfo) {
+            windowInfo = updatedWindowInfo
+            let mousePos = currentMouseTopLeftPosition()
+            return [
+                "text": text,
+                "position": ["x": mousePos.x, "y": mousePos.y],
+                "isEditable": isEditableElement(focusedElement),
+                "window": windowInfo
+            ]
         }
         
         // Fallback to main window
-        var windowRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &windowRef) == .success,
-           let window = windowRef {
-            let windowElement = window as! AXUIElement
-            
-            // Get window title
-            var titleRef: CFTypeRef?
-            if AXUIElementCopyAttributeValue(windowElement, kAXTitleAttribute as CFString, &titleRef) == .success,
-               let title = titleRef as? String {
-                windowInfo["windowTitle"] = title
-            }
-            
-            var selectedTextRef: CFTypeRef?
-            if AXUIElementCopyAttributeValue(windowElement, kAXSelectedTextAttribute as CFString, &selectedTextRef) == .success,
-               let selectedText = selectedTextRef as? String {
-                let mousePos = currentMouseTopLeftPosition()
-                return [
-                    "text": selectedText,
-                    "position": ["x": mousePos.x, "y": mousePos.y],
-                    "isEditable": false,
-                    "window": windowInfo
-                ]
-            }
+        if let mainWindow = getMainWindow(appElement),
+           let (text, updatedWindowInfo) = getSelectedText(from: mainWindow, windowInfo: windowInfo) {
+            windowInfo = updatedWindowInfo
+            let mousePos = currentMouseTopLeftPosition()
+            return [
+                "text": text,
+                "position": ["x": mousePos.x, "y": mousePos.y],
+                "isEditable": false,
+                "window": windowInfo
+            ]
         }
         
         return nil
     }
-
-    func getSelectedTextViaClipboard() -> String? {
-        guard !isProcessingClipboard else {
+    
+    private func getFocusedElement(_ appElement: AXUIElement) -> AXUIElement? {
+        var focusedElement: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedElement) == .success else {
+            return nil
+        }
+        return (focusedElement as! AXUIElement)
+    }
+    
+    private func getMainWindow(_ appElement: AXUIElement) -> AXUIElement? {
+        var mainWindow: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &mainWindow) == .success else {
+            return nil
+        }
+        return (mainWindow as! AXUIElement)
+    }
+    
+    private func getSelectedText(from element: AXUIElement, windowInfo: [String: Any]) -> (String, [String: Any])? {
+        var updatedWindowInfo = windowInfo
+        var selectedText: CFTypeRef?
+        
+        // Get window title if available
+        if let window = getWindowForElement(element),
+           let title = getWindowTitle(window) {
+            updatedWindowInfo["windowTitle"] = title
+        }
+        
+        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selectedText) == .success,
+              let text = selectedText as? String else {
             return nil
         }
         
+        return (text, updatedWindowInfo)
+    }
+    
+    private func getWindowForElement(_ element: AXUIElement) -> AXUIElement? {
+        var window: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXWindowAttribute as CFString, &window) == .success else {
+            return nil
+        }
+        return (window as! AXUIElement)
+    }
+    
+    private func getWindowTitle(_ window: AXUIElement) -> String? {
+        var title: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &title) == .success else {
+            return nil
+        }
+        return title as? String
+    }
+    
+    private func isEditableElement(_ element: AXUIElement) -> Bool {
+        var editable: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXEditableAttribute as CFString, &editable) == .success else {
+            return false
+        }
+        return editable as? Bool ?? false
+    }
+    
+    // MARK: - Clipboard Fallback
+    private func getSelectedTextViaClipboard() -> String? {
+        guard !isProcessingClipboard else { return nil }
         isProcessingClipboard = true
         defer { isProcessingClipboard = false }
         
-        if let eventTap = eventTap {
-            CGEvent.tapEnable(tap: eventTap, enable: false)
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
         }
-        
-        defer {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                self.ensureEventTapActive()
-            }
-        }
+        defer { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.ensureEventTapActive() } }
         
         let pasteboard = NSPasteboard.general
         let originalContent = pasteboard.string(forType: .string)
         let originalChangeCount = pasteboard.changeCount
         
         pasteboard.clearContents()
+        NSWorkspace.shared.frontmostApplication?.activate(options: [])
         
-        let currentApp = NSWorkspace.shared.frontmostApplication
-        currentApp?.activate(options: [])
-        
-        usleep(50000)
+        usleep(50000) // 50ms delay
         
         let src = CGEventSource(stateID: .hidSystemState)
         let loc = CGEventTapLocation.cghidEventTap
         
-        for attempt in 1...3 {
-            let keyCDown = CGEvent(keyboardEventSource: src, virtualKey: 8, keyDown: true)
-            keyCDown?.flags = .maskCommand
-            let keyCUp = CGEvent(keyboardEventSource: src, virtualKey: 8, keyDown: false)
-            keyCUp?.flags = .maskCommand
+        for _ in 1...3 {
+            let keyDown = CGEvent(keyboardEventSource: src, virtualKey: 8, keyDown: true) // C key
+            keyDown?.flags = .maskCommand
+            let keyUp = CGEvent(keyboardEventSource: src, virtualKey: 8, keyDown: false)
+            keyUp?.flags = .maskCommand
             
-            keyCDown?.post(tap: loc)
-            usleep(20000)
-            keyCUp?.post(tap: loc)
+            keyDown?.post(tap: loc)
+            usleep(20000) // 20ms
+            keyUp?.post(tap: loc)
             
             let startTime = CFAbsoluteTimeGetCurrent()
-            let timeout: CFTimeInterval = 0.3
-            
-            while CFAbsoluteTimeGetCurrent() - startTime < timeout {
-                if pasteboard.changeCount > originalChangeCount {
-                    if let copiedText = pasteboard.string(forType: .string) {
-                        pasteboard.clearContents()
-                        if let originalContent = originalContent {
-                            pasteboard.setString(originalContent, forType: .string)
-                        }
-                        return copiedText
+            while CFAbsoluteTimeGetCurrent() - startTime < 0.3 { // 300ms timeout
+                if pasteboard.changeCount > originalChangeCount,
+                   let copiedText = pasteboard.string(forType: .string) {
+                    pasteboard.clearContents()
+                    if let content = originalContent {
+                        pasteboard.setString(content, forType: .string)
                     }
+                    return copiedText
                 }
-                usleep(10000)
+                usleep(10000) // 10ms
             }
-            
-            if attempt < 3 {
-                usleep(100000)
-            }
+            usleep(100000) // 100ms between attempts
         }
         
         pasteboard.clearContents()
-        if let originalContent = originalContent {
-            pasteboard.setString(originalContent, forType: .string)
+        if let content = originalContent {
+            pasteboard.setString(content, forType: .string)
         }
-        
         return nil
     }
-
-    func handleSelectionOrDeselection(wasDrag: Bool, clickCount: Int, modifierPressed: Bool) {
-        guard let selection = SelectionObserver.currentSelection() else {
-            if popupShown {
-                sendResetSignal()
-            }
+    
+    // MARK: - Signal Handling
+    private func sendSignalIfChanged(_ dict: [String: Any]) {
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys]),
+              let jsonString = String(data: jsonData, encoding: .utf8),
+              jsonString != lastSentSignal else {
             return
         }
         
-        let selectedText = selection["text"] as? String ?? ""
-        let windowInfo = selection["window"] as? [String: Any]
-        lastWindowInfo = windowInfo
-        
-        let hasMeaningfulText = !selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        
-        if (wasDrag || clickCount == 2 || clickCount == 3), hasMeaningfulText, selectedText != lastSelectionText {
-            // Store initial mouse position when selection is made
-            let mousePos = NSEvent.mouseLocation
-            initialMousePosition = CGPoint(x: mousePos.x, y: mousePos.y)
-            
-            // Schedule the signal to be sent after time threshold, pass modifierPressed flag
-            pendingSelectionText = selectedText
-            pendingSelectionTimer?.invalidate()
-            pendingSelectionTimer = Timer.scheduledTimer(withTimeInterval: timeThreshold, repeats: false) { [weak self] _ in
-                self?.handlePendingSelection(modifierPressed: modifierPressed)
-            }
-        }
-        else if !hasMeaningfulText, popupShown {
-            sendResetSignal()
-        }
+        print(jsonString, terminator: "\n")
+        fflush(stdout)
+        lastSentSignal = jsonString
     }
-
-    func startMouseEventListener(selectionChanged: @escaping (Bool, Int, Bool) -> Void) {
-        selectionChangedHandler = selectionChanged
-
-        let mouseEventMask =
-            (1 << CGEventType.leftMouseUp.rawValue) |
-            (1 << CGEventType.rightMouseUp.rawValue) |
-            (1 << CGEventType.mouseMoved.rawValue) |
-            (1 << CGEventType.leftMouseDragged.rawValue) |
-            (1 << CGEventType.rightMouseDragged.rawValue) |
-            (1 << CGEventType.leftMouseDown.rawValue) |
-            (1 << CGEventType.rightMouseDown.rawValue)
-
-        eventTap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: CGEventMask(mouseEventMask),
-            callback: globalMouseEventCallback,
-            userInfo: nil
-        )
-
-        if let eventTap = eventTap {
-            runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
-            CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
-            CGEvent.tapEnable(tap: eventTap, enable: true)
-        } else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                self.setupMouseEventListener()
-            }
-        }
+    
+    private func sendResetSignal() {
+        let mousePos = currentMouseTopLeftPosition()
+        let empty: [String: Any] = [
+            "text": "",
+            "position": ["x": mousePos.x, "y": mousePos.y]
+        ]
+        sendSignalIfChanged(empty)
+        resetSelectionState()
     }
-
-    func listenForProcessedText() {
-        DispatchQueue.global().async {
+    
+    private func resetSelectionState() {
+        popupShown = false
+        lastPopupPosition = nil
+        lastSelectionText = ""
+        lastWindowInfo = nil
+        pendingSelectionText = nil
+        pendingSelectionTimer?.invalidate()
+        pendingSelectionTimer = nil
+        initialMousePosition = nil
+    }
+    
+    // MARK: - Position Utilities
+    private func currentMouseTopLeftPosition() -> (x: CGFloat, y: CGFloat) {
+        let mouseLocation = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first(where: { NSMouseInRect(mouseLocation, $0.frame, false) }) ?? NSScreen.main
+        guard let screenFrame = screen?.frame else {
+            let h = NSScreen.main?.frame.height ?? 0
+            return (mouseLocation.x, h - mouseLocation.y)
+        }
+        let flippedY = screenFrame.origin.y + screenFrame.size.height - mouseLocation.y
+        return (mouseLocation.x, flippedY)
+    }
+    
+    // MARK: - Paste Handling
+    private func listenForProcessedText() {
+        DispatchQueue.global().async { [weak self] in
             while let line = readLine() {
-                if let data = line.data(using: .utf8),
-                   let json = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] {
-                    
-                    let text = json["text"] as? String ?? line
-                    let appPID = json["appPID"] as? pid_t
-                    
-                    self.copyToClipboard(text)
-                    self.performPaste(targetAppPID: appPID)
-                } else {
-                    self.copyToClipboard(line)
-                    self.performPaste(targetAppPID: nil)
+                DispatchQueue.main.async {
+                    self?.handleIncomingText(line)
                 }
             }
         }
     }
-
-    func copyToClipboard(_ text: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-    }
-
-    func performPaste(targetAppPID: pid_t?) {
-        if let eventTap = eventTap {
-            CGEvent.tapEnable(tap: eventTap, enable: false)
-        }
-        
-        defer {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-                self?.ensureEventTapActive()
-            }
-        }
-        
-        sendResetSignal()
-        
-        guard let pid = targetAppPID ?? (lastWindowInfo?["appPID"] as? pid_t) else {
+    
+    private func handleIncomingText(_ text: String) {
+        guard let data = text.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            copyAndPaste(text: text)
             return
         }
         
-        let appRef = AXUIElementCreateApplication(pid)
+        let processedText = json["text"] as? String ?? text
+        let targetPID = json["appPID"] as? pid_t
         
-        if let app = NSRunningApplication(processIdentifier: pid) {
-            if !app.activate(options: [.activateAllWindows]) {
-                let script = """
-                tell application "System Events"
-                    set frontmost of process whose unix id is \(pid) to true
-                end tell
-                """
-                
-                let task = Process()
-                task.launchPath = "/usr/bin/osascript"
-                task.arguments = ["-e", script]
-                task.launch()
-                task.waitUntilExit()
-            }
-        }
+        copyAndPaste(text: processedText, targetAppPID: targetPID)
+    }
+    
+    private func copyAndPaste(text: String, targetAppPID: pid_t? = nil) {
+        copyToClipboard(text)
+        performPaste(targetAppPID: targetAppPID ?? (lastWindowInfo?["appPID"] as? pid_t))
+    }
+    
+    private func copyToClipboard(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+    
+    private func performPaste(targetAppPID: pid_t?) {
+        guard let pid = targetAppPID else { return }
         
-        var windowRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(appRef, kAXMainWindowAttribute as CFString, &windowRef) == .success,
-        let window = windowRef {
-            AXUIElementSetAttributeValue(window as! AXUIElement, kAXMainAttribute as CFString, kCFBooleanTrue)
-            AXUIElementSetAttributeValue(window as! AXUIElement, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-            usleep(150000)
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
         }
+        defer { DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.ensureEventTapActive() } }
+        
+        sendResetSignal()
+        activateApplication(pid: pid)
+        focusMainWindow(pid: pid)
         
         let src = CGEventSource(stateID: .hidSystemState)
         let loc = CGEventTapLocation.cghidEventTap
         
-        let keyDown = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true)
+        let keyDown = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true) // V key
         keyDown?.flags = .maskCommand
-        
         let keyUp = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false)
         keyUp?.flags = .maskCommand
         
         keyDown?.post(tap: loc)
-        usleep(30000)
+        usleep(30000) // 30ms
         keyUp?.post(tap: loc)
     }
-
+    
+    private func activateApplication(pid: pid_t) {
+        guard let app = NSRunningApplication(processIdentifier: pid) else { return }
+        
+        if !app.activate(options: [.activateAllWindows]) {
+            let script = """
+            tell application "System Events"
+                set frontmost of process whose unix id is \(pid) to true
+            end tell
+            """
+            
+            let task = Process()
+            task.launchPath = "/usr/bin/osascript"
+            task.arguments = ["-e", script]
+            task.launch()
+            task.waitUntilExit()
+        }
+    }
+    
+    private func focusMainWindow(pid: pid_t) {
+        let appRef = AXUIElementCreateApplication(pid)
+        var windowRef: CFTypeRef?
+        
+        guard AXUIElementCopyAttributeValue(appRef, kAXMainWindowAttribute as CFString, &windowRef) == .success,
+              let window = windowRef else {
+            return
+        }
+        
+        let windowElement = window as! AXUIElement
+        AXUIElementSetAttributeValue(windowElement, kAXMainAttribute as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(windowElement, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        usleep(150000) // 150ms
+    }
+    
+    // MARK: - Utilities
+    @objc private func windowFocusChanged(_ notification: Notification? = nil) {
+        if popupShown {
+            sendResetSignal()
+        }
+        ensureEventTapActive()
+    }
+    
+    private func ensureEventTapActive() {
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: true)
+        }
+    }
+    
+    // MARK: - Main Loop
     func run() {
         CFRunLoopRun()
     }
 }
 
+// MARK: - Application Entry Point
 let observer = SelectionObserver()
 observer.run()
