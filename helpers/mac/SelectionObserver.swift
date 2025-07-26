@@ -6,6 +6,26 @@ import ApplicationServices
 // MARK: - Constants
 let kAXEditableAttribute = "AXEditable"
 
+// MARK: - Web App Constants
+private let webAppBundleIDs = [
+    "com.google.Chrome",
+    "com.apple.Safari",
+    "org.mozilla.firefox",
+    "com.microsoft.edgemac",
+    "com.brave.Browser",
+    "com.operasoftware.Opera"
+]
+
+// MARK: - Google Docs Constants
+private let googleDocsDomains = [
+    "docs.google.com",
+    "drive.google.com",
+    " - Google Docs",
+    " - Google Drive",
+    "— Google Docs",
+    "— Google Drive"
+]
+
 // MARK: - Modifier State Tracking
 struct ModifierFlags: OptionSet {
     let rawValue: Int
@@ -37,13 +57,11 @@ class ModifierState {
     func update(with event: CGEvent) {
         let newFlags = ModifierFlags(cgEventFlags: event.flags)
         
-        // Immediate update for mouse down events
         if [.leftMouseDown, .rightMouseDown].contains(event.type) {
             currentFlags = newFlags
             return
         }
         
-        // Debounced update for other events
         debounceTimer?.invalidate()
         debounceTimer = Timer.scheduledTimer(withTimeInterval: debounceInterval, repeats: false) { [weak self] _ in
             self?.currentFlags = newFlags
@@ -65,6 +83,7 @@ class SelectionObserver {
     private var lastSentSignal: String?
     private var mouseIsDragging = false
     private var lastWindowInfo: [String: Any]?
+    private var isGoogleDocs = false
     
     // Modifier state
     let modifierState = ModifierState()
@@ -112,6 +131,41 @@ class SelectionObserver {
     private func invalidateTimers() {
         mouseUpSelectionCheckTimer?.invalidate()
         pendingSelectionTimer?.invalidate()
+    }
+    
+    // MARK: - Google Docs Detection
+    private func checkForGoogleDocs(pid: pid_t) -> Bool {
+        guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
+        guard webAppBundleIDs.contains(app.bundleIdentifier ?? "") else { return false }
+        
+        let windowInfo = getWindowInfoForPID(pid: pid)
+        guard let windowTitle = windowInfo["windowTitle"] as? String else { return false }
+        
+        let lowercasedTitle = windowTitle.lowercased()
+        
+        for domain in googleDocsDomains {
+            if lowercasedTitle.contains(domain.lowercased()) {
+                return true
+            }
+        }
+        
+        return false
+    }
+    
+    private func getWindowInfoForPID(pid: pid_t) -> [String: Any] {
+        let appElement = AXUIElementCreateApplication(pid)
+        var windowInfo: [String: Any] = [
+            "appName": NSRunningApplication(processIdentifier: pid)?.localizedName ?? "unknown",
+            "appPID": pid,
+            "windowTitle": ""
+        ]
+        
+        if let window = getMainWindow(appElement),
+           let title = getWindowTitle(window) {
+            windowInfo["windowTitle"] = title
+        }
+        
+        return windowInfo
     }
     
     // MARK: - Mouse Event Handling
@@ -279,14 +333,62 @@ class SelectionObserver {
         }
         
         let pid = frontApp.processIdentifier
+        isGoogleDocs = checkForGoogleDocs(pid: pid)
+        
+        if isGoogleDocs {
+            return getGoogleDocsSelection(pid: pid)
+        }
+        
+        if webAppBundleIDs.contains(frontApp.bundleIdentifier ?? "") {
+            return getWebAppSelection(pid: pid)
+        }
+        
+        return getNativeAppSelection(pid: pid)
+    }
+    
+    private func getGoogleDocsSelection(pid: pid_t) -> [String: Any]? {
+        guard let text = getSelectedTextViaClipboard(enhanced: true) else {
+            return nil
+        }
+        
+        let mousePos = currentMouseTopLeftPosition()
+        let windowInfo = getWindowInfoForPID(pid: pid)
+        
+        return [
+            "text": text,
+            "position": ["x": mousePos.x, "y": mousePos.y],
+            "isEditable": true,  // Force true for Google Docs
+            "window": windowInfo,
+            "source": "google-docs"
+        ]
+    }
+
+    private func getWebAppSelection(pid: pid_t) -> [String: Any]? {
+        if let nativeSelection = getNativeAppSelection(pid: pid) {
+            return nativeSelection
+        }
+        
+        if let clipboardText = getSelectedTextViaClipboard(enhanced: false) {
+            let mousePos = currentMouseTopLeftPosition()
+            return [
+                "text": clipboardText,
+                "position": ["x": mousePos.x, "y": mousePos.y],
+                "isEditable": true,  // Most web apps are editable
+                "window": getWindowInfoForPID(pid: pid)
+            ]
+        }
+        
+        return nil
+    }
+        
+    private func getNativeAppSelection(pid: pid_t) -> [String: Any]? {
         let appElement = AXUIElementCreateApplication(pid)
         var windowInfo: [String: Any] = [
-            "appName": frontApp.localizedName ?? "unknown",
+            "appName": NSRunningApplication(processIdentifier: pid)?.localizedName ?? "unknown",
             "appPID": pid,
             "windowTitle": ""
         ]
         
-        // Try focused element first
         if let focusedElement = getFocusedElement(appElement),
            let (text, updatedWindowInfo) = getSelectedText(from: focusedElement, windowInfo: windowInfo) {
             windowInfo = updatedWindowInfo
@@ -299,7 +401,6 @@ class SelectionObserver {
             ]
         }
         
-        // Fallback to main window
         if let mainWindow = getMainWindow(appElement),
            let (text, updatedWindowInfo) = getSelectedText(from: mainWindow, windowInfo: windowInfo) {
             windowInfo = updatedWindowInfo
@@ -335,7 +436,6 @@ class SelectionObserver {
         var updatedWindowInfo = windowInfo
         var selectedText: CFTypeRef?
         
-        // Get window title if available
         if let window = getWindowForElement(element),
            let title = getWindowTitle(window) {
             updatedWindowInfo["windowTitle"] = title
@@ -373,8 +473,8 @@ class SelectionObserver {
         return editable as? Bool ?? false
     }
     
-    // MARK: - Clipboard Fallback
-    private func getSelectedTextViaClipboard() -> String? {
+    // MARK: - Enhanced Clipboard Handling
+    private func getSelectedTextViaClipboard(enhanced: Bool = false) -> String? {
         guard !isProcessingClipboard else { return nil }
         isProcessingClipboard = true
         defer { isProcessingClipboard = false }
@@ -388,44 +488,63 @@ class SelectionObserver {
         let originalContent = pasteboard.string(forType: .string)
         let originalChangeCount = pasteboard.changeCount
         
+        if enhanced {
+            for _ in 1...3 {
+                pasteboard.clearContents()
+                simulateCopyCommand()
+                
+                let startTime = CFAbsoluteTimeGetCurrent()
+                while CFAbsoluteTimeGetCurrent() - startTime < 0.5 {
+                    if pasteboard.changeCount > originalChangeCount,
+                       let text = pasteboard.string(forType: .string),
+                       !text.isEmpty {
+                        pasteboard.clearContents()
+                        if let original = originalContent {
+                            pasteboard.setString(original, forType: .string)
+                        }
+                        return text
+                    }
+                    usleep(50000)
+                }
+                usleep(100000)
+            }
+        } else {
+            pasteboard.clearContents()
+            simulateCopyCommand()
+            
+            let startTime = CFAbsoluteTimeGetCurrent()
+            while CFAbsoluteTimeGetCurrent() - startTime < 0.3 {
+                if pasteboard.changeCount > originalChangeCount,
+                   let text = pasteboard.string(forType: .string) {
+                    pasteboard.clearContents()
+                    if let original = originalContent {
+                        pasteboard.setString(original, forType: .string)
+                    }
+                    return text
+                }
+                usleep(10000)
+            }
+        }
+        
         pasteboard.clearContents()
-        NSWorkspace.shared.frontmostApplication?.activate(options: [])
-        
-        usleep(50000) // 50ms delay
-        
+        if let original = originalContent {
+            pasteboard.setString(original, forType: .string)
+        }
+        return nil
+    }
+    
+    private func simulateCopyCommand() {
         let src = CGEventSource(stateID: .hidSystemState)
         let loc = CGEventTapLocation.cghidEventTap
         
-        for _ in 1...3 {
-            let keyDown = CGEvent(keyboardEventSource: src, virtualKey: 8, keyDown: true) // C key
-            keyDown?.flags = .maskCommand
-            let keyUp = CGEvent(keyboardEventSource: src, virtualKey: 8, keyDown: false)
-            keyUp?.flags = .maskCommand
-            
-            keyDown?.post(tap: loc)
-            usleep(20000) // 20ms
-            keyUp?.post(tap: loc)
-            
-            let startTime = CFAbsoluteTimeGetCurrent()
-            while CFAbsoluteTimeGetCurrent() - startTime < 0.3 { // 300ms timeout
-                if pasteboard.changeCount > originalChangeCount,
-                   let copiedText = pasteboard.string(forType: .string) {
-                    pasteboard.clearContents()
-                    if let content = originalContent {
-                        pasteboard.setString(content, forType: .string)
-                    }
-                    return copiedText
-                }
-                usleep(10000) // 10ms
-            }
-            usleep(100000) // 100ms between attempts
-        }
+        let keyDown = CGEvent(keyboardEventSource: src, virtualKey: 8, keyDown: true)
+        keyDown?.flags = .maskCommand
+        let keyUp = CGEvent(keyboardEventSource: src, virtualKey: 8, keyDown: false)
+        keyUp?.flags = .maskCommand
         
-        pasteboard.clearContents()
-        if let content = originalContent {
-            pasteboard.setString(content, forType: .string)
-        }
-        return nil
+        keyDown?.post(tap: loc)
+        usleep(30000)
+        keyUp?.post(tap: loc)
     }
     
     // MARK: - Signal Handling
@@ -523,13 +642,13 @@ class SelectionObserver {
         let src = CGEventSource(stateID: .hidSystemState)
         let loc = CGEventTapLocation.cghidEventTap
         
-        let keyDown = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true) // V key
+        let keyDown = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true)
         keyDown?.flags = .maskCommand
         let keyUp = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false)
         keyUp?.flags = .maskCommand
         
         keyDown?.post(tap: loc)
-        usleep(30000) // 30ms
+        usleep(30000)
         keyUp?.post(tap: loc)
     }
     
@@ -563,7 +682,7 @@ class SelectionObserver {
         let windowElement = window as! AXUIElement
         AXUIElementSetAttributeValue(windowElement, kAXMainAttribute as CFString, kCFBooleanTrue)
         AXUIElementSetAttributeValue(windowElement, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-        usleep(150000) // 150ms
+        usleep(150000)
     }
     
     // MARK: - Utilities
