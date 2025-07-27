@@ -583,7 +583,8 @@ class SelectionObserver {
         
         let hasMeaningfulText = !selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         
-        if (wasDrag || clickCount >= 2), hasMeaningfulText, selectedText != lastSelectionText {
+        // Handle all selection types: drag, double-click, triple-click
+        if (wasDrag || clickCount >= 2) && hasMeaningfulText && selectedText != lastSelectionText {
             initialMousePosition = NSEvent.mouseLocation
             pendingSelectionText = selectedText
             pendingSelectionTimer?.invalidate()
@@ -594,7 +595,7 @@ class SelectionObserver {
             ) { [weak self] _ in
                 self?.handlePendingSelection(modifiers: modifiers)
             }
-        } else if !hasMeaningfulText, popupShown {
+        } else if !hasMeaningfulText && popupShown {
             sendResetSignal()
         }
     }
