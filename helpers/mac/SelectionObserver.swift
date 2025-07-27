@@ -20,10 +20,34 @@ private let webAppBundleIDs = [
 private let googleDocsDomains = [
     "docs.google.com",
     "drive.google.com",
-    " - Google Docs",
-    " - Google Drive",
-    "— Google Docs",
-    "— Google Drive"
+    "Google Docs",
+    "Google Drive"
+]
+
+// MARK: - Text Editor Bundle IDs
+private let textEditorBundleIDs = [
+    "com.apple.TextEdit",          // TextEdit
+    "com.apple.Notes",             // Notes
+    "com.microsoft.VSCode",        // VS Code
+    "com.sublimetext.4",           // Sublime Text
+    "com.jetbrains.intellij",      // IntelliJ IDEA
+    "com.jetbrains.AppCode",       // AppCode
+    "com.jetbrains.CLion",         // CLion
+    "com.jetbrains.datagrip",      // DataGrip
+    "com.jetbrains.goland",        // GoLand
+    "com.jetbrains.PhpStorm",      // PhpStorm
+    "com.jetbrains.pycharm",       // PyCharm
+    "com.jetbrains.rider",         // Rider
+    "com.jetbrains.rubymine",      // RubyMine
+    "com.jetbrains.WebStorm",      // WebStorm
+    "com.panic.Nova",              // Nova
+    "com.coteditor.CotEditor",     // CotEditor
+    "org.vim.MacVim",              // MacVim
+    "com.macromates.TextMate",     // TextMate
+    "com.barebones.bbedit",        // BBEdit
+    "com.activestate.komodo-ide",  // Komodo IDE
+    "com.ultraedit.UltraEdit",     // UltraEdit
+    "com.codelobster.IDEDeveloper" // Codelobster
 ]
 
 // MARK: - Modifier State Tracking
@@ -83,7 +107,6 @@ class SelectionObserver {
     private var lastSentSignal: String?
     private var mouseIsDragging = false
     private var lastWindowInfo: [String: Any]?
-    private var isGoogleDocs = false
     
     // Modifier state
     let modifierState = ModifierState()
@@ -133,23 +156,241 @@ class SelectionObserver {
         pendingSelectionTimer?.invalidate()
     }
     
-    // MARK: - Google Docs Detection
-    private func checkForGoogleDocs(pid: pid_t) -> Bool {
-        guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
-        guard webAppBundleIDs.contains(app.bundleIdentifier ?? "") else { return false }
+    // MARK: - Context Detection
+    private func isGoogleDocsContext(bundleID: String?, windowTitle: String?) -> Bool {
+        guard let bundleID = bundleID, webAppBundleIDs.contains(bundleID),
+              let title = windowTitle else { return false }
         
-        let windowInfo = getWindowInfoForPID(pid: pid)
-        guard let windowTitle = windowInfo["windowTitle"] as? String else { return false }
+        return googleDocsDomains.contains { domain in
+            title.localizedCaseInsensitiveContains(domain)
+        }
+    }
+    
+    private func isTextEditorContext(bundleID: String?) -> Bool {
+        guard let bundleID = bundleID else { return false }
+        return textEditorBundleIDs.contains(bundleID)
+    }
+    
+    private func isWebBrowser(bundleID: String?) -> Bool {
+        guard let bundleID = bundleID else { return false }
+        return webAppBundleIDs.contains(bundleID)
+    }
+    
+    private func hasEditableFocus(pid: pid_t) -> Bool {
+        let appElement = AXUIElementCreateApplication(pid)
+        guard let focusedElement = getFocusedElement(appElement) else {
+            return false
+        }
         
-        let lowercasedTitle = windowTitle.lowercased()
+        // Check AXEditable attribute
+        var isEditable: CFTypeRef?
+        if AXUIElementCopyAttributeValue(focusedElement, kAXEditableAttribute as CFString, &isEditable) == .success {
+            return isEditable as? Bool ?? false
+        }
         
-        for domain in googleDocsDomains {
-            if lowercasedTitle.contains(domain.lowercased()) {
-                return true
+        // Check for text input roles
+        var role: CFTypeRef?
+        if AXUIElementCopyAttributeValue(focusedElement, kAXRoleAttribute as CFString, &role) == .success {
+            if let roleValue = role as? String {
+                let editableRoles: Set<String> = [
+                    kAXTextFieldRole,
+                    kAXTextAreaRole,
+                    "AXContentGroup",  // Apple Notes
+                    "AXDocument",      // Some editors
+                    "AXWebArea"        // Web content
+                ]
+                
+                // Special case for web content: editable only if in input field
+                if roleValue == "AXWebArea" {
+                    return isWebContentEditable(focusedElement)
+                }
+                
+                return editableRoles.contains(roleValue)
             }
         }
         
         return false
+    }
+    
+    private func isWebContentEditable(_ element: AXUIElement) -> Bool {
+        var children: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success,
+              let childrenArray = children as? [AXUIElement] else {
+            return false
+        }
+        
+        for child in childrenArray {
+            var role: CFTypeRef?
+            if AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &role) == .success,
+               let roleValue = role as? String,
+               roleValue == kAXTextAreaRole || roleValue == kAXTextFieldRole {
+                
+                // Check if it's editable
+                var editable: CFTypeRef?
+                if AXUIElementCopyAttributeValue(child, kAXEditableAttribute as CFString, &editable) == .success {
+                    return editable as? Bool ?? false
+                }
+            }
+        }
+        
+        return false
+    }
+    
+    // MARK: - Selection Handling
+    private func getCurrentSelection() -> [String: Any]? {
+        guard let frontApp = NSWorkspace.shared.frontmostApplication else {
+            return nil
+        }
+        
+        let pid = frontApp.processIdentifier
+        let bundleID = frontApp.bundleIdentifier
+        var windowInfo = getWindowInfoForPID(pid: pid)
+        let windowTitle = windowInfo["windowTitle"] as? String
+        
+        // Determine editability based on context
+        let isEditable: Bool = {
+            if isGoogleDocsContext(bundleID: bundleID, windowTitle: windowTitle) {
+                return true
+            }
+            if isTextEditorContext(bundleID: bundleID) {
+                return true
+            }
+            if isWebBrowser(bundleID: bundleID) {
+                return hasEditableFocus(pid: pid)
+            }
+            return hasEditableFocus(pid: pid)
+        }()
+        
+        // Get selection content
+        var selectionInfo: [String: Any]?
+        
+        if isGoogleDocsContext(bundleID: bundleID, windowTitle: windowTitle) {
+            selectionInfo = getGoogleDocsSelection(pid: pid)
+        } else if isWebBrowser(bundleID: bundleID) {
+            selectionInfo = getWebAppSelection(pid: pid)
+        } else {
+            selectionInfo = getNativeAppSelection(pid: pid)
+        }
+        
+        // Merge results
+        if var selection = selectionInfo {
+            selection["isEditable"] = isEditable
+            selection["window"] = windowInfo
+            return selection
+        }
+        
+        return nil
+    }
+    
+    private func getGoogleDocsSelection(pid: pid_t) -> [String: Any]? {
+        guard let text = getSelectedTextViaClipboard(enhanced: true) else {
+            return nil
+        }
+        
+        let mousePos = currentMouseTopLeftPosition()
+        return [
+            "text": text,
+            "position": ["x": mousePos.x, "y": mousePos.y],
+            "source": "google-docs"
+        ]
+    }
+
+    private func getWebAppSelection(pid: pid_t) -> [String: Any]? {
+        if let nativeSelection = getNativeAppSelection(pid: pid) {
+            return nativeSelection
+        }
+        
+        if let clipboardText = getSelectedTextViaClipboard(enhanced: false) {
+            let mousePos = currentMouseTopLeftPosition()
+            return [
+                "text": clipboardText,
+                "position": ["x": mousePos.x, "y": mousePos.y]
+            ]
+        }
+        
+        return nil
+    }
+        
+    private func getNativeAppSelection(pid: pid_t) -> [String: Any]? {
+        let appElement = AXUIElementCreateApplication(pid)
+        var windowInfo: [String: Any] = [
+            "appName": NSRunningApplication(processIdentifier: pid)?.localizedName ?? "unknown",
+            "appPID": pid,
+            "windowTitle": ""
+        ]
+        
+        if let focusedElement = getFocusedElement(appElement),
+           let (text, updatedWindowInfo) = getSelectedText(from: focusedElement, windowInfo: windowInfo) {
+            windowInfo = updatedWindowInfo
+            let mousePos = currentMouseTopLeftPosition()
+            return [
+                "text": text,
+                "position": ["x": mousePos.x, "y": mousePos.y],
+                "window": windowInfo
+            ]
+        }
+        
+        if let mainWindow = getMainWindow(appElement),
+           let (text, updatedWindowInfo) = getSelectedText(from: mainWindow, windowInfo: windowInfo) {
+            windowInfo = updatedWindowInfo
+            let mousePos = currentMouseTopLeftPosition()
+            return [
+                "text": text,
+                "position": ["x": mousePos.x, "y": mousePos.y],
+                "window": windowInfo
+            ]
+        }
+        
+        return nil
+    }
+    
+    private func getFocusedElement(_ appElement: AXUIElement) -> AXUIElement? {
+        var focusedElement: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedElement) == .success else {
+            return nil
+        }
+        return (focusedElement as! AXUIElement)
+    }
+    
+    private func getMainWindow(_ appElement: AXUIElement) -> AXUIElement? {
+        var mainWindow: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &mainWindow) == .success else {
+            return nil
+        }
+        return (mainWindow as! AXUIElement)
+    }
+    
+    private func getSelectedText(from element: AXUIElement, windowInfo: [String: Any]) -> (String, [String: Any])? {
+        var updatedWindowInfo = windowInfo
+        var selectedText: CFTypeRef?
+        
+        if let window = getWindowForElement(element),
+           let title = getWindowTitle(window) {
+            updatedWindowInfo["windowTitle"] = title
+        }
+        
+        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selectedText) == .success,
+              let text = selectedText as? String else {
+            return nil
+        }
+        
+        return (text, updatedWindowInfo)
+    }
+    
+    private func getWindowForElement(_ element: AXUIElement) -> AXUIElement? {
+        var window: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXWindowAttribute as CFString, &window) == .success else {
+            return nil
+        }
+        return (window as! AXUIElement)
+    }
+    
+    private func getWindowTitle(_ window: AXUIElement) -> String? {
+        var title: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &title) == .success else {
+            return nil
+        }
+        return title as? String
     }
     
     private func getWindowInfoForPID(pid: pid_t) -> [String: Any] {
@@ -166,6 +407,80 @@ class SelectionObserver {
         }
         
         return windowInfo
+    }
+    
+    // MARK: - Enhanced Clipboard Handling
+    private func getSelectedTextViaClipboard(enhanced: Bool = false) -> String? {
+        guard !isProcessingClipboard else { return nil }
+        isProcessingClipboard = true
+        defer { isProcessingClipboard = false }
+        
+        if let tap = eventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+        }
+        defer { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.ensureEventTapActive() } }
+        
+        let pasteboard = NSPasteboard.general
+        let originalContent = pasteboard.string(forType: .string)
+        let originalChangeCount = pasteboard.changeCount
+        
+        if enhanced {
+            for _ in 1...3 {
+                pasteboard.clearContents()
+                simulateCopyCommand()
+                
+                let startTime = CFAbsoluteTimeGetCurrent()
+                while CFAbsoluteTimeGetCurrent() - startTime < 0.5 {
+                    if pasteboard.changeCount > originalChangeCount,
+                       let text = pasteboard.string(forType: .string),
+                       !text.isEmpty {
+                        pasteboard.clearContents()
+                        if let original = originalContent {
+                            pasteboard.setString(original, forType: .string)
+                        }
+                        return text
+                    }
+                    usleep(50000)
+                }
+                usleep(100000)
+            }
+        } else {
+            pasteboard.clearContents()
+            simulateCopyCommand()
+            
+            let startTime = CFAbsoluteTimeGetCurrent()
+            while CFAbsoluteTimeGetCurrent() - startTime < 0.3 {
+                if pasteboard.changeCount > originalChangeCount,
+                   let text = pasteboard.string(forType: .string) {
+                    pasteboard.clearContents()
+                    if let original = originalContent {
+                        pasteboard.setString(original, forType: .string)
+                    }
+                    return text
+                }
+                usleep(10000)
+            }
+        }
+        
+        pasteboard.clearContents()
+        if let original = originalContent {
+            pasteboard.setString(original, forType: .string)
+        }
+        return nil
+    }
+    
+    private func simulateCopyCommand() {
+        let src = CGEventSource(stateID: .hidSystemState)
+        let loc = CGEventTapLocation.cghidEventTap
+        
+        let keyDown = CGEvent(keyboardEventSource: src, virtualKey: 8, keyDown: true)
+        keyDown?.flags = .maskCommand
+        let keyUp = CGEvent(keyboardEventSource: src, virtualKey: 8, keyDown: false)
+        keyUp?.flags = .maskCommand
+        
+        keyDown?.post(tap: loc)
+        usleep(30000)
+        keyUp?.post(tap: loc)
     }
     
     // MARK: - Mouse Event Handling
@@ -302,10 +617,20 @@ class SelectionObserver {
             var selectionData: [String: Any] = [
                 "text": pendingText,
                 "position": ["x": mousePos.x, "y": mousePos.y],
-                "isEditable": false,
                 "window": lastWindowInfo ?? [:]
             ]
             
+            // Get fresh selection data for accurate state
+            if let currentSelection = getCurrentSelection() {
+                if let isEditable = currentSelection["isEditable"] as? Bool {
+                    selectionData["isEditable"] = isEditable
+                }
+                if let source = currentSelection["source"] as? String {
+                    selectionData["source"] = source
+                }
+            }
+            
+            // Add modifiers if needed
             if !modifiers.isEmpty {
                 var modifierStrings: [String] = []
                 if modifiers.contains(.shift)    { modifierStrings.append("shift") }
@@ -322,227 +647,6 @@ class SelectionObserver {
         pendingSelectionText = nil
         pendingSelectionTimer = nil
         initialMousePosition = nil
-    }
-    
-    // MARK: - Selection Utilities
-    private func getCurrentSelection() -> [String: Any]? {
-        guard let frontApp = NSWorkspace.shared.frontmostApplication else {
-            return nil
-        }
-        
-        let pid = frontApp.processIdentifier
-        isGoogleDocs = checkForGoogleDocs(pid: pid)
-        
-        if isGoogleDocs {
-            return getGoogleDocsSelection(pid: pid)
-        }
-        
-        if webAppBundleIDs.contains(frontApp.bundleIdentifier ?? "") {
-            return getWebAppSelection(pid: pid)
-        }
-        
-        return getNativeAppSelection(pid: pid)
-    }
-    
-    private func getGoogleDocsSelection(pid: pid_t) -> [String: Any]? {
-        guard let text = getSelectedTextViaClipboard(enhanced: true) else {
-            return nil
-        }
-        
-        let mousePos = currentMouseTopLeftPosition()
-        let windowInfo = getWindowInfoForPID(pid: pid)
-        
-        return [
-            "text": text,
-            "position": ["x": mousePos.x, "y": mousePos.y],
-            "isEditable": true,  // Force true for Google Docs
-            "window": windowInfo,
-            "source": "google-docs"
-        ]
-    }
-
-    private func getWebAppSelection(pid: pid_t) -> [String: Any]? {
-        if let nativeSelection = getNativeAppSelection(pid: pid) {
-            return nativeSelection
-        }
-        
-        if let clipboardText = getSelectedTextViaClipboard(enhanced: false) {
-            let mousePos = currentMouseTopLeftPosition()
-            return [
-                "text": clipboardText,
-                "position": ["x": mousePos.x, "y": mousePos.y],
-                "isEditable": true,  // Most web apps are editable
-                "window": getWindowInfoForPID(pid: pid)
-            ]
-        }
-        
-        return nil
-    }
-        
-    private func getNativeAppSelection(pid: pid_t) -> [String: Any]? {
-        let appElement = AXUIElementCreateApplication(pid)
-        var windowInfo: [String: Any] = [
-            "appName": NSRunningApplication(processIdentifier: pid)?.localizedName ?? "unknown",
-            "appPID": pid,
-            "windowTitle": ""
-        ]
-        
-        if let focusedElement = getFocusedElement(appElement),
-           let (text, updatedWindowInfo) = getSelectedText(from: focusedElement, windowInfo: windowInfo) {
-            windowInfo = updatedWindowInfo
-            let mousePos = currentMouseTopLeftPosition()
-            return [
-                "text": text,
-                "position": ["x": mousePos.x, "y": mousePos.y],
-                "isEditable": isEditableElement(focusedElement),
-                "window": windowInfo
-            ]
-        }
-        
-        if let mainWindow = getMainWindow(appElement),
-           let (text, updatedWindowInfo) = getSelectedText(from: mainWindow, windowInfo: windowInfo) {
-            windowInfo = updatedWindowInfo
-            let mousePos = currentMouseTopLeftPosition()
-            return [
-                "text": text,
-                "position": ["x": mousePos.x, "y": mousePos.y],
-                "isEditable": false,
-                "window": windowInfo
-            ]
-        }
-        
-        return nil
-    }
-    
-    private func getFocusedElement(_ appElement: AXUIElement) -> AXUIElement? {
-        var focusedElement: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedElement) == .success else {
-            return nil
-        }
-        return (focusedElement as! AXUIElement)
-    }
-    
-    private func getMainWindow(_ appElement: AXUIElement) -> AXUIElement? {
-        var mainWindow: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &mainWindow) == .success else {
-            return nil
-        }
-        return (mainWindow as! AXUIElement)
-    }
-    
-    private func getSelectedText(from element: AXUIElement, windowInfo: [String: Any]) -> (String, [String: Any])? {
-        var updatedWindowInfo = windowInfo
-        var selectedText: CFTypeRef?
-        
-        if let window = getWindowForElement(element),
-           let title = getWindowTitle(window) {
-            updatedWindowInfo["windowTitle"] = title
-        }
-        
-        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &selectedText) == .success,
-              let text = selectedText as? String else {
-            return nil
-        }
-        
-        return (text, updatedWindowInfo)
-    }
-    
-    private func getWindowForElement(_ element: AXUIElement) -> AXUIElement? {
-        var window: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXWindowAttribute as CFString, &window) == .success else {
-            return nil
-        }
-        return (window as! AXUIElement)
-    }
-    
-    private func getWindowTitle(_ window: AXUIElement) -> String? {
-        var title: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &title) == .success else {
-            return nil
-        }
-        return title as? String
-    }
-    
-    private func isEditableElement(_ element: AXUIElement) -> Bool {
-        var editable: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXEditableAttribute as CFString, &editable) == .success else {
-            return false
-        }
-        return editable as? Bool ?? false
-    }
-    
-    // MARK: - Enhanced Clipboard Handling
-    private func getSelectedTextViaClipboard(enhanced: Bool = false) -> String? {
-        guard !isProcessingClipboard else { return nil }
-        isProcessingClipboard = true
-        defer { isProcessingClipboard = false }
-        
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-        }
-        defer { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.ensureEventTapActive() } }
-        
-        let pasteboard = NSPasteboard.general
-        let originalContent = pasteboard.string(forType: .string)
-        let originalChangeCount = pasteboard.changeCount
-        
-        if enhanced {
-            for _ in 1...3 {
-                pasteboard.clearContents()
-                simulateCopyCommand()
-                
-                let startTime = CFAbsoluteTimeGetCurrent()
-                while CFAbsoluteTimeGetCurrent() - startTime < 0.5 {
-                    if pasteboard.changeCount > originalChangeCount,
-                       let text = pasteboard.string(forType: .string),
-                       !text.isEmpty {
-                        pasteboard.clearContents()
-                        if let original = originalContent {
-                            pasteboard.setString(original, forType: .string)
-                        }
-                        return text
-                    }
-                    usleep(50000)
-                }
-                usleep(100000)
-            }
-        } else {
-            pasteboard.clearContents()
-            simulateCopyCommand()
-            
-            let startTime = CFAbsoluteTimeGetCurrent()
-            while CFAbsoluteTimeGetCurrent() - startTime < 0.3 {
-                if pasteboard.changeCount > originalChangeCount,
-                   let text = pasteboard.string(forType: .string) {
-                    pasteboard.clearContents()
-                    if let original = originalContent {
-                        pasteboard.setString(original, forType: .string)
-                    }
-                    return text
-                }
-                usleep(10000)
-            }
-        }
-        
-        pasteboard.clearContents()
-        if let original = originalContent {
-            pasteboard.setString(original, forType: .string)
-        }
-        return nil
-    }
-    
-    private func simulateCopyCommand() {
-        let src = CGEventSource(stateID: .hidSystemState)
-        let loc = CGEventTapLocation.cghidEventTap
-        
-        let keyDown = CGEvent(keyboardEventSource: src, virtualKey: 8, keyDown: true)
-        keyDown?.flags = .maskCommand
-        let keyUp = CGEvent(keyboardEventSource: src, virtualKey: 8, keyDown: false)
-        keyUp?.flags = .maskCommand
-        
-        keyDown?.post(tap: loc)
-        usleep(30000)
-        keyUp?.post(tap: loc)
     }
     
     // MARK: - Signal Handling
