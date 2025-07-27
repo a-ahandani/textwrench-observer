@@ -57,7 +57,7 @@ class ModifierState {
     func update(with event: CGEvent) {
         let newFlags = ModifierFlags(cgEventFlags: event.flags)
         
-        if [.leftMouseDown, .rightMouseDown].contains(event.type) {
+        if [.leftMouseDown].contains(event.type) {
             currentFlags = newFlags
             return
         }
@@ -172,19 +172,17 @@ class SelectionObserver {
     private func setupMouseEventListener() {
         let mouseEventMask =
             (1 << CGEventType.leftMouseUp.rawValue) |
-            (1 << CGEventType.rightMouseUp.rawValue) |
             (1 << CGEventType.mouseMoved.rawValue) |
             (1 << CGEventType.leftMouseDragged.rawValue) |
             (1 << CGEventType.rightMouseDragged.rawValue) |
-            (1 << CGEventType.leftMouseDown.rawValue) |
-            (1 << CGEventType.rightMouseDown.rawValue)
+            (1 << CGEventType.leftMouseDown.rawValue)
         
         let observerRef = Unmanaged.passUnretained(self).toOpaque()
         
         eventTap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
-            options: .defaultTap,
+            options: .listenOnly,
             eventsOfInterest: CGEventMask(mouseEventMask),
             callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
                 let observer = Unmanaged<SelectionObserver>.fromOpaque(refcon!).takeUnretainedValue()
@@ -209,13 +207,13 @@ class SelectionObserver {
         modifierState.update(with: event)
         
         switch type {
-        case .leftMouseDown, .rightMouseDown:
+        case .leftMouseDown:
             mouseIsDragging = false
             
         case .leftMouseDragged, .rightMouseDragged:
             mouseIsDragging = true
             
-        case .leftMouseUp, .rightMouseUp:
+        case .leftMouseUp:
             handleMouseUp(event: event)
             
         case .mouseMoved:
