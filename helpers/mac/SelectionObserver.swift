@@ -489,7 +489,6 @@ class SelectionObserver {
             (1 << CGEventType.leftMouseUp.rawValue) |
             (1 << CGEventType.mouseMoved.rawValue) |
             (1 << CGEventType.leftMouseDragged.rawValue) |
-            (1 << CGEventType.rightMouseDragged.rawValue) |
             (1 << CGEventType.leftMouseDown.rawValue)
         
         let observerRef = Unmanaged.passUnretained(self).toOpaque()
@@ -525,7 +524,7 @@ class SelectionObserver {
         case .leftMouseDown:
             mouseIsDragging = false
             
-        case .leftMouseDragged, .rightMouseDragged:
+        case .leftMouseDragged:
             mouseIsDragging = true
             
         case .leftMouseUp:
@@ -778,7 +777,7 @@ class SelectionObserver {
         var windowRef: CFTypeRef?
         
         guard AXUIElementCopyAttributeValue(appRef, kAXMainWindowAttribute as CFString, &windowRef) == .success,
-              let window = windowRef else {
+            let window = windowRef else {
             return
         }
         
