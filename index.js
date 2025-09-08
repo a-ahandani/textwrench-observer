@@ -20,7 +20,16 @@ function startHelper() {
     throw new Error('Unsupported OS');
   }
 
-  helper = spawn(helperPath);
+  if (helperPath.includes('.asar')) {
+    helperPath = helperPath.replace('.asar', '.asar.unpacked');
+  }
+
+  try {
+    helper = spawn(helperPath, { stdio: ['pipe', 'pipe', 'pipe'] });
+  } catch (e) {
+    console.error('[textwrench-observer] Failed to spawn helper at', helperPath, e);
+    throw e;
+  }
 
   helper.stdout.on('data', data => {
     buffer += data.toString();
@@ -75,7 +84,7 @@ function paste(processedText) {
 // Listen for selections
 function onSelection(callback) {
   startHelper();
-  
+
   // Wrap the callback to allow for disposable listeners
   const wrappedCallback = (result) => {
     const shouldRemove = callback(result);
@@ -86,7 +95,7 @@ function onSelection(callback) {
       }
     }
   };
-  
+
   listeners.push(wrappedCallback);
   return {
     dispose: () => {
