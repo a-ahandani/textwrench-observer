@@ -50,6 +50,17 @@ private let textEditorBundleIDs = [
     "com.codelobster.IDEDeveloper" // Codelobster
 ]
 
+// MARK: - Electron Apps Special Cases (Teams etc.)
+private let electronSpecialBundleIDs: Set<String> = [
+    "com.microsoft.teams",      // Legacy Teams
+    "com.microsoft.teams2"      // New Teams (preview / GA)
+]
+
+private func isElectronSpecial(bundleID: String?) -> Bool {
+    guard let bundleID = bundleID else { return false }
+    return electronSpecialBundleIDs.contains(bundleID)
+}
+
 // MARK: - Modifier State Tracking
 struct ModifierFlags: OptionSet {
     let rawValue: Int
@@ -255,16 +266,10 @@ class SelectionObserver {
         let windowTitle = windowInfo["windowTitle"] as? String
         
         // Determine editability based on context
-        let isEditable: Bool = {
-            if isGoogleDocsContext(bundleID: bundleID, windowTitle: windowTitle) {
-                return true
-            }
-            if isTextEditorContext(bundleID: bundleID) {
-                return true
-            }
-            if isWebBrowser(bundleID: bundleID) {
-                return hasEditableFocus(pid: pid)
-            }
+        var isEditable: Bool = {
+            if isGoogleDocsContext(bundleID: bundleID, windowTitle: windowTitle) { return true }
+            if isTextEditorContext(bundleID: bundleID) { return true }
+            if isWebBrowser(bundleID: bundleID) { return hasEditableFocus(pid: pid) }
             return hasEditableFocus(pid: pid)
         }()
         
@@ -273,6 +278,10 @@ class SelectionObserver {
         
         if isGoogleDocsContext(bundleID: bundleID, windowTitle: windowTitle) {
             selectionInfo = getGoogleDocsSelection(pid: pid)
+        } else if isElectronSpecial(bundleID: bundleID) {
+            // Teams (Electron) often blocks AXSelectedText; rely on clipboard simulation
+            selectionInfo = getElectronSelection(pid: pid)
+                ?? getNativeAppSelection(pid: pid)
         } else if isWebBrowser(bundleID: bundleID) {
             selectionInfo = getWebAppSelection(pid: pid)
         } else {
@@ -281,6 +290,12 @@ class SelectionObserver {
         
         // Merge results
         if var selection = selectionInfo {
+            // If electron special and we got non-empty text via clipboard, assume editable even if AX said false
+            if isElectronSpecial(bundleID: bundleID),
+               let txt = selection["text"] as? String,
+               !txt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                isEditable = true
+            }
             selection["isEditable"] = isEditable
             selection["window"] = windowInfo
             return selection
@@ -300,6 +315,19 @@ class SelectionObserver {
             "position": ["x": mousePos.x, "y": mousePos.y],
             "source": "google-docs"
         ]
+    }
+
+    private func getElectronSelection(pid: pid_t) -> [String: Any]? {
+        // Electron apps like Teams may not expose AXSelectedText reliably; use enhanced clipboard retrieval with a couple retries.
+        if let text = getSelectedTextViaClipboard(enhanced: true) {
+            let mousePos = currentMouseTopLeftPosition()
+            return [
+                "text": text,
+                "position": ["x": mousePos.x, "y": mousePos.y],
+                "source": "electron-clipboard"
+            ]
+        }
+        return nil
     }
 
     private func getWebAppSelection(pid: pid_t) -> [String: Any]? {
@@ -438,12 +466,16 @@ class SelectionObserver {
         let originalChangeCount = pasteboard.changeCount
         
         if enhanced {
-            for _ in 1...3 {
+            // If current front app is an Electron special (e.g., Teams) allow a bit more time/retries
+            let frontBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+            let attempts = isElectronSpecial(bundleID: frontBundle) ? 5 : 3
+            let perAttemptTimeout: CFTimeInterval = isElectronSpecial(bundleID: frontBundle) ? 0.7 : 0.5
+            for _ in 1...attempts {
                 pasteboard.clearContents()
                 simulateCopyCommand()
                 
                 let startTime = CFAbsoluteTimeGetCurrent()
-                while CFAbsoluteTimeGetCurrent() - startTime < 0.5 {
+                while CFAbsoluteTimeGetCurrent() - startTime < perAttemptTimeout {
                     if pasteboard.changeCount > originalChangeCount,
                        let text = pasteboard.string(forType: .string),
                        !text.isEmpty {
@@ -456,7 +488,7 @@ class SelectionObserver {
                     }
                     usleep(50000)
                 }
-                usleep(100000)
+                usleep(120000)
             }
         } else {
             pasteboard.clearContents()
@@ -511,7 +543,8 @@ class SelectionObserver {
             (1 << CGEventType.leftMouseUp.rawValue) |
             (1 << CGEventType.mouseMoved.rawValue) |
             (1 << CGEventType.leftMouseDragged.rawValue) |
-            (1 << CGEventType.leftMouseDown.rawValue)
+            (1 << CGEventType.leftMouseDown.rawValue) |
+            (1 << CGEventType.flagsChanged.rawValue)
         
         let observerRef = Unmanaged.passUnretained(self).toOpaque()
         
@@ -547,16 +580,15 @@ class SelectionObserver {
         switch type {
         case .leftMouseDown:
             mouseIsDragging = false
-            
         case .leftMouseDragged:
             mouseIsDragging = true
-            
         case .leftMouseUp:
             handleMouseUp(event: event)
-            
         case .mouseMoved:
             handleMouseMoved(event: event)
-            
+        case .flagsChanged:
+            // modifierState.update already called at top; nothing else needed
+            break
         default:
             break
         }
