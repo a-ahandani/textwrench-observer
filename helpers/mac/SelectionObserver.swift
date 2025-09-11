@@ -150,7 +150,12 @@ final class SelectionObserver {
     private func emit(text: String, isEditable: Bool) {
         guard hasContent(text) else { return }
         let pos = NSEvent.mouseLocation
-        let payload: [String: Any] = ["text": text, "position": ["x": pos.x, "y": pos.y], "isEditable": isEditable]
+        var payload: [String: Any] = [
+            "text": text,
+            "position": ["x": pos.x, "y": pos.y],
+            "isEditable": isEditable
+        ]
+        if let win = currentWindowInfo() { payload["window"] = win }
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
               let json = String(data: data, encoding: .utf8), json != lastSentJSON else { return }
         print(json)
@@ -213,6 +218,27 @@ final class SelectionObserver {
         let dx = abs(current.x - anchor.x)
         let dy = abs(current.y - anchor.y)
         if dx > cancelDistanceX || dy > cancelDistanceY { emitEmptyIfNeeded() }
+    }
+
+    // MARK: - Window Info (minimal)
+    private func currentWindowInfo() -> [String: Any]? {
+        guard let front = NSWorkspace.shared.frontmostApplication else { return nil }
+        let pid = front.processIdentifier
+        var info: [String: Any] = [
+            "appName": front.localizedName ?? "unknown",
+            "appPID": pid,
+            "windowTitle": ""
+        ]
+        let appEl = AXUIElementCreateApplication(pid)
+        var mainWindowRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(appEl, kAXMainWindowAttribute as CFString, &mainWindowRef) == .success,
+           let win = mainWindowRef {
+            let winEl = win as! AXUIElement
+            var titleRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(winEl, kAXTitleAttribute as CFString, &titleRef) == .success,
+               let t = titleRef as? String { info["windowTitle"] = t }
+        }
+        return info
     }
 }
 
