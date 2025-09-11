@@ -27,6 +27,7 @@ final class SelectionObserver {
     private var mouseUpPosition: CGPoint?
     private var currentModifiers: Set<String> = []
     private var selectionModifiers: [String] = []
+    private var lastWindowInfo: [String: Any]? // store window info for paste targeting
 
     init() {
         setupEventTap()
@@ -180,6 +181,7 @@ final class SelectionObserver {
         lastMovementCheckTime = selectionTimestamp
         retrievalTimers.forEach { $0.cancel() }
         retrievalTimers.removeAll()
+    if let win = payload["window"] as? [String: Any] { lastWindowInfo = win }
     }
 
     private func cleaned(_ s: String) -> String { s.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -301,12 +303,13 @@ final class SelectionObserver {
             return
         }
         let processedText = (json["text"] as? String) ?? text
-        copyAndPaste(text: processedText)
+        let pid = json["appPID"] as? pid_t
+        copyAndPaste(text: processedText, targetAppPID: pid)
     }
 
-    private func copyAndPaste(text: String) {
+    private func copyAndPaste(text: String, targetAppPID: pid_t? = nil) {
         copyToClipboard(text)
-        performPaste()
+        performPaste(targetAppPID: targetAppPID ?? (lastWindowInfo?["appPID"] as? pid_t))
     }
 
     private func copyToClipboard(_ text: String) {
@@ -314,17 +317,65 @@ final class SelectionObserver {
         NSPasteboard.general.setString(text, forType: .string)
     }
 
-    private func performPaste() {
-        // Issue Command+V key events.
+    private func performPaste(targetAppPID: pid_t?) {
+        guard let pid = targetAppPID else {
+            // Fallback: just issue paste globally
+            issuePasteKeystroke()
+            return
+        }
+        if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: false) }
+        // Clear selection popup state
+        emitEmptyIfNeeded()
+        // Activate and focus target app
+        activateApplication(pid: pid)
+        focusMainWindow(pid: pid)
+        // Small delay to allow focus
+        usleep(120_000)
+        issuePasteKeystroke()
+        // Re-enable tap after slight delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            if let tap = self?.eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
+        }
+    }
+
+    private func issuePasteKeystroke() {
         let source = CGEventSource(stateID: .hidSystemState)
         let tapLoc = CGEventTapLocation.cghidEventTap
-        let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true) // 'v'
+        let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true)
         keyDown?.flags = .maskCommand
         let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false)
         keyUp?.flags = .maskCommand
         keyDown?.post(tap: tapLoc)
-        usleep(30000)
+        usleep(30_000)
         keyUp?.post(tap: tapLoc)
+    }
+
+    private func activateApplication(pid: pid_t) {
+        guard let app = NSRunningApplication(processIdentifier: pid) else { return }
+        if !app.activate(options: [.activateAllWindows]) {
+            let script = """
+            tell application "System Events"
+                set frontmost of process whose unix id is \(pid) to true
+            end tell
+            """
+            let task = Process()
+            task.launchPath = "/usr/bin/osascript"
+            task.arguments = ["-e", script]
+            try? task.run()
+            task.waitUntilExit()
+        }
+    }
+
+    private func focusMainWindow(pid: pid_t) {
+        let appRef = AXUIElementCreateApplication(pid)
+        var windowRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(appRef, kAXMainWindowAttribute as CFString, &windowRef) == .success,
+           let win = windowRef {
+            let windowEl = win as! AXUIElement
+            AXUIElementSetAttributeValue(windowEl, kAXMainAttribute as CFString, kCFBooleanTrue)
+            AXUIElementSetAttributeValue(windowEl, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            usleep(150_000)
+        }
     }
 }
 
