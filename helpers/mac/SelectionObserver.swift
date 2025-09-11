@@ -31,6 +31,7 @@ final class SelectionObserver {
     init() {
         setupEventTap()
         setupAXObserver()
+    listenForProcessedText()
     }
 
     func run() { CFRunLoopRun() }
@@ -281,6 +282,49 @@ final class SelectionObserver {
                let t = titleRef as? String { info["windowTitle"] = t }
         }
         return info
+    }
+
+    // MARK: - Paste Handling (simplified)
+    private func listenForProcessedText() {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            while let line = readLine() {
+                DispatchQueue.main.async { self?.handleIncomingText(line) }
+            }
+        }
+    }
+
+    private func handleIncomingText(_ text: String) {
+        // Accept either plain text or { text:..., appPID:... }
+        guard let data = text.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            copyAndPaste(text: text)
+            return
+        }
+        let processedText = (json["text"] as? String) ?? text
+        copyAndPaste(text: processedText)
+    }
+
+    private func copyAndPaste(text: String) {
+        copyToClipboard(text)
+        performPaste()
+    }
+
+    private func copyToClipboard(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    private func performPaste() {
+        // Issue Command+V key events.
+        let source = CGEventSource(stateID: .hidSystemState)
+        let tapLoc = CGEventTapLocation.cghidEventTap
+        let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true) // 'v'
+        keyDown?.flags = .maskCommand
+        let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false)
+        keyUp?.flags = .maskCommand
+        keyDown?.post(tap: tapLoc)
+        usleep(30000)
+        keyUp?.post(tap: tapLoc)
     }
 }
 
