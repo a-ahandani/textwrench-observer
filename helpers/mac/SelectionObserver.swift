@@ -24,6 +24,9 @@ final class SelectionObserver {
     private var lastMovementCheckPos: CGPoint?
     private var lastMovementCheckTime: TimeInterval = 0
     private let movementCheckInterval: TimeInterval = 0.04 // sample throttling
+    private var mouseUpPosition: CGPoint?
+    private var currentModifiers: Set<String> = []
+    private var selectionModifiers: [String] = []
 
     init() {
         setupEventTap()
@@ -54,13 +57,20 @@ final class SelectionObserver {
     }
 
     private func handle(eventType: CGEventType, event: CGEvent) {
-        if eventType == .flagsChanged { optionDown = event.flags.contains(.maskAlternate) }
+        if eventType == .flagsChanged {
+            optionDown = event.flags.contains(.maskAlternate)
+            updateCurrentModifiers(from: event.flags)
+        }
         if eventType == .leftMouseUp { mouseReleased() }
         if eventType == .mouseMoved || eventType == .leftMouseDragged { trackMovement(event) }
     }
 
     private func mouseReleased() {
         guard optionDown else { return }
+    // Capture legacy top-left coordinate at mouse up
+    mouseUpPosition = legacyMouseTopLeftPoint()
+    // Snapshot modifiers at mouse up
+    selectionModifiers = Array(currentModifiers).sorted()
         mouseUpTimer?.invalidate()
         mouseUpTimer = Timer.scheduledTimer(withTimeInterval: 0.03, repeats: false) { [weak self] _ in
             self?.startRetrieval()
@@ -149,12 +159,13 @@ final class SelectionObserver {
 
     private func emit(text: String, isEditable: Bool) {
         guard hasContent(text) else { return }
-        let pos = NSEvent.mouseLocation
+    let pos = mouseUpPosition ?? legacyMouseTopLeftPoint()
         var payload: [String: Any] = [
             "text": text,
             "position": ["x": pos.x, "y": pos.y],
             "isEditable": isEditable
         ]
+    if !selectionModifiers.isEmpty { payload["modifiers"] = selectionModifiers }
         if let win = currentWindowInfo() { payload["window"] = win }
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
               let json = String(data: data, encoding: .utf8), json != lastSentJSON else { return }
@@ -162,7 +173,7 @@ final class SelectionObserver {
         fflush(stdout)
         lastSentJSON = json
         lastHadSelection = true
-        selectionAnchor = NSEvent.mouseLocation
+    selectionAnchor = pos // use legacy top-left based capture point for movement anchoring
         selectionTimestamp = CFAbsoluteTimeGetCurrent()
         lastMovementCheckPos = selectionAnchor
         lastMovementCheckTime = selectionTimestamp
@@ -191,8 +202,11 @@ final class SelectionObserver {
     }
 
     private func emitEmptyIfNeeded() {
-        let pos = NSEvent.mouseLocation
-        let payload: [String: Any] = ["text": "", "position": ["x": pos.x, "y": pos.y]]
+        let pos = mouseUpPosition ?? legacyMouseTopLeftPoint()
+        let payload: [String: Any] = [
+            "text": "",
+            "position": ["x": pos.x, "y": pos.y]
+        ]
         if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
            let json = String(data: data, encoding: .utf8), json != lastSentJSON {
             print(json)
@@ -203,6 +217,8 @@ final class SelectionObserver {
         selectionAnchor = nil
         selectionTimestamp = 0
         lastMovementCheckPos = nil
+    mouseUpPosition = nil
+    selectionModifiers = []
     }
 
     private func trackMovement(_ event: CGEvent) {
@@ -218,6 +234,32 @@ final class SelectionObserver {
         let dx = abs(current.x - anchor.x)
         let dy = abs(current.y - anchor.y)
         if dx > cancelDistanceX || dy > cancelDistanceY { emitEmptyIfNeeded() }
+    }
+
+    // Legacy top-left coordinate conversion (flips Y within screen bounds)
+    private func legacyMouseTopLeftPoint() -> CGPoint {
+        let mouse = NSEvent.mouseLocation
+        let screens = NSScreen.screens
+        let screen = screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
+        if let f = screen?.frame {
+            let flippedY = f.origin.y + f.size.height - mouse.y
+            return CGPoint(x: mouse.x, y: flippedY)
+        }
+        // Fallback using primary screen height
+        if let h = NSScreen.main?.frame.height {
+            return CGPoint(x: mouse.x, y: h - mouse.y)
+        }
+        return mouse
+    }
+
+    // MARK: - Modifier Handling
+    private func updateCurrentModifiers(from flags: CGEventFlags) {
+        var mods: Set<String> = []
+        if flags.contains(.maskShift) { mods.insert("shift") }
+        if flags.contains(.maskControl) { mods.insert("control") }
+        if flags.contains(.maskAlternate) { mods.insert("option") }
+        if flags.contains(.maskCommand) { mods.insert("command") }
+        currentModifiers = mods
     }
 
     // MARK: - Window Info (minimal)
