@@ -108,6 +108,23 @@ final class SelectionObserver {
             // emit an empty signal to mirror the legacy behavior where a deselection is sent
             // once the selection collapses.
             if lastHadSelection { emitEmptyIfNeeded() }
+            if !lastHadSelection {
+                // We never had a selection across all passes
+                fputs("selected is empty\n", stderr)
+                // Clipboard fallback: issue Cmd+C then read pasteboard
+                if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: false) }
+                issueCopyKeystroke()
+                // Allow a short delay for target app to update clipboard
+                usleep(90_000)
+                let pb = NSPasteboard.general
+                if let clip = pb.string(forType: .string), hasContent(clip) {
+                    // Emit clipboard text as if selected (isEditable unknown -> false)
+                    emit(text: cleaned(clip), isEditable: false)
+                } else {
+                    fputs("clipboard also empty\n", stderr)
+                }
+                if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
+            }
         }
     }
 
@@ -160,7 +177,11 @@ final class SelectionObserver {
     }
 
     private func emit(text: String, isEditable: Bool) {
-        guard hasContent(text) else { return }
+        guard hasContent(text) else {
+            // Text provided but after cleaning it's empty
+            fputs("selected is empty\n", stderr)
+            return
+        }
     let pos = mouseUpPosition ?? legacyMouseTopLeftPoint()
         var payload: [String: Any] = [
             "text": text,
@@ -344,6 +365,19 @@ final class SelectionObserver {
         let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true)
         keyDown?.flags = .maskCommand
         let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false)
+        keyUp?.flags = .maskCommand
+        keyDown?.post(tap: tapLoc)
+        usleep(30_000)
+        keyUp?.post(tap: tapLoc)
+    }
+
+    private func issueCopyKeystroke() {
+        let source = CGEventSource(stateID: .hidSystemState)
+        let tapLoc = CGEventTapLocation.cghidEventTap
+        // 'C' key virtual code: 8 (kVK_ANSI_C)
+        let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 8, keyDown: true)
+        keyDown?.flags = .maskCommand
+        let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 8, keyDown: false)
         keyUp?.flags = .maskCommand
         keyDown?.post(tap: tapLoc)
         usleep(30_000)
