@@ -41,7 +41,8 @@ final class SelectionObserver {
         let mask = (1 << CGEventType.leftMouseUp.rawValue) |
                    (1 << CGEventType.flagsChanged.rawValue) |
                    (1 << CGEventType.mouseMoved.rawValue) |
-                   (1 << CGEventType.leftMouseDragged.rawValue)
+                   (1 << CGEventType.leftMouseDragged.rawValue) |
+                   (1 << CGEventType.keyDown.rawValue)
         let ref = Unmanaged.passUnretained(self).toOpaque()
         eventTap = CGEvent.tapCreate(tap: .cgSessionEventTap,
                                      place: .headInsertEventTap,
@@ -65,6 +66,32 @@ final class SelectionObserver {
         }
         if eventType == .leftMouseUp { mouseReleased() }
         if eventType == .mouseMoved || eventType == .leftMouseDragged { trackMovement(event) }
+        if eventType == .keyDown { handleKeyDown(event) }
+    }
+
+    // MARK: - Keyboard Shortcut Handling
+    private func handleKeyDown(_ event: CGEvent) {
+        // Virtual key code for 'C' is 8 (kVK_ANSI_C)
+        let cKeyCode: Int64 = 8
+        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        if keyCode != cKeyCode { return }
+        // Require Control + Shift (and NOT Command / Option) for explicitness
+        let flags = event.flags
+        let hasControl = flags.contains(.maskControl)
+        let hasShift = flags.contains(.maskShift)
+        if !(hasControl && hasShift) { return }
+        // Ignore if Command or Option also pressed (avoid clashes with standard shortcuts)
+        if flags.contains(.maskCommand) || flags.contains(.maskAlternate) { return }
+        // Debounce: ignore autorepeat
+        let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+        if isRepeat { return }
+        // Snapshot modifiers (derived from last flagsChanged + explicit control/shift)
+        updateCurrentModifiers(from: flags)
+        selectionModifiers = Array(currentModifiers).sorted()
+        // Use current mouse position as anchor reference
+        mouseUpPosition = legacyMouseTopLeftPoint()
+        // Start the same multi-pass retrieval used for Option+Drag flow
+        startRetrieval()
     }
 
     private func mouseReleased() {
